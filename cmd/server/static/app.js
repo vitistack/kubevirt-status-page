@@ -73,6 +73,25 @@
         const memPct = totMemMB > 0 ? Math.round((useMemMB / totMemMB) * 100) : 0;
         const readyClusters = clusters.filter(c => (c.vms || []).every(v => v.status === "Running")).length;
 
+        // Redundancy: how many nodes can fail and workloads still fit?
+        // Sort nodes by capacity (smallest first), greedily remove until remaining < used.
+        const sortedCaps = nodes.map(n => ({
+            cpu: n.cpuAllocatable || n.cpuCapacity || 0,
+            mem: n.memAllocMB || n.memoryCapMB || 0
+        })).sort((a, b) => (a.cpu + a.mem) - (b.cpu + b.mem));
+        let spareCPU = totCPU - useCPU;
+        let spareMem = totMemMB - useMemMB;
+        let redundantNodes = 0;
+        for (const cap of sortedCaps) {
+            if (spareCPU >= cap.cpu && spareMem >= cap.mem) {
+                redundantNodes++;
+                spareCPU -= cap.cpu;
+                spareMem -= cap.mem;
+            } else {
+                break;
+            }
+        }
+
         function pctCls(p) { return p < 60 ? "ok" : p < 85 ? "warn" : "err"; }
 
         el.innerHTML = `<div class="overview-bar">
@@ -85,6 +104,11 @@
                 <span class="ov-label">NODES</span>
                 <span class="ov-value ${readyN === nodes.length ? "ok" : "warn"}">${readyN}/${nodes.length}</span>
                 <span class="ov-sub">ready</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">REDUNDANCY</span>
+                <span class="ov-value ${redundantNodes >= 2 ? "ok" : redundantNodes >= 1 ? "warn" : "err"}">${redundantNodes}</span>
+                <span class="ov-sub">node${redundantNodes === 1 ? "" : "s"} can fail</span>
             </div>
             <div class="ov-item">
                 <span class="ov-label">VMS</span>
