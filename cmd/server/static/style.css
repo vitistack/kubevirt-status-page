@@ -42,6 +42,10 @@ header h1 {
     background: #065f46;
     color: #6ee7b7;
 }
+.connection-badge.reconnecting {
+    background: #78350f;
+    color: #fde68a;
+}
 .connection-badge.disconnected {
     background: #7f1d1d;
     color: #fca5a5;

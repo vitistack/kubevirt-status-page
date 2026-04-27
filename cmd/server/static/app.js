@@ -12,17 +12,23 @@
         .catch(err => console.error("Initial fetch failed:", err));
 
     // --- SSE for live updates ---
+    let sseErrorCount = 0;
+
     function connectSSE() {
         const es = new EventSource("/events");
         const badge = document.getElementById("connection-status");
 
         es.onopen = () => {
+            sseErrorCount = 0;
             badge.textContent = "Live";
             badge.className = "connection-badge connected";
         };
 
         es.onmessage = (e) => {
             try {
+                sseErrorCount = 0;
+                badge.textContent = "Live";
+                badge.className = "connection-badge connected";
                 const data = JSON.parse(e.data);
                 render(data);
             } catch (err) {
@@ -31,8 +37,16 @@
         };
 
         es.onerror = () => {
-            badge.textContent = "Disconnected";
-            badge.className = "connection-badge disconnected";
+            sseErrorCount++;
+            if (sseErrorCount <= 1) {
+                // First miss: stay Live, just retry
+            } else if (sseErrorCount <= 3) {
+                badge.textContent = "Reconnecting";
+                badge.className = "connection-badge reconnecting";
+            } else {
+                badge.textContent = "Disconnected";
+                badge.className = "connection-badge disconnected";
+            }
             es.close();
             setTimeout(connectSSE, 3000);
         };
