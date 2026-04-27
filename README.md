@@ -51,6 +51,55 @@ kubevirt-status-page
 4. **Access the status page:**
    Open your web browser and navigate to `http://localhost:8080` to view the KubeVirt status page.
 
+## Helm Chart Installation
+
+The application can be deployed to a Kubernetes cluster using the Helm chart.
+
+### Prerequisites
+
+- Kubernetes cluster with KubeVirt installed
+- Helm 3.x
+
+### Install from OCI registry
+
+```bash
+helm install kubevirt-status-page oci://ghcr.io/vitistack/helm/kubevirt-status-page --version <version>
+```
+
+### Install from source
+
+```bash
+helm install kubevirt-status-page ./charts/kubevirt-status-page
+```
+
+### Configuration
+
+Key values can be overridden during installation:
+
+```bash
+helm install kubevirt-status-page oci://ghcr.io/vitistack/helm/kubevirt-status-page \
+  --set ingress.enabled=true \
+  --set ingress.hosts[0].host=status.example.com \
+  --set ingress.hosts[0].paths[0].path=/ \
+  --set ingress.hosts[0].paths[0].pathType=ImplementationSpecific
+```
+
+| Parameter | Description | Default |
+|---|---|---|
+| `replicaCount` | Number of replicas | `1` |
+| `image.repository` | Container image | `ghcr.io/vitistack/kubevirt-status-page` |
+| `image.tag` | Image tag (defaults to chart appVersion) | `""` |
+| `service.type` | Service type | `ClusterIP` |
+| `service.port` | Service port | `80` |
+| `ingress.enabled` | Enable ingress | `false` |
+| `kubeContext` | Kubernetes context (empty for in-cluster) | `""` |
+
+### Uninstall
+
+```bash
+helm uninstall kubevirt-status-page
+```
+
 ## Usage
 
 The application connects to the KubeVirt cluster and retrieves information about nodes and VMs. It uses Server-Sent Events (SSE) to provide real-time updates to the frontend, ensuring that the status page reflects the current state of the cluster.
