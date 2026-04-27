@@ -1,0 +1,64 @@
+# KubeVirt Status Page
+
+This project is a status page application that provides a graphical view of KubeVirt nodes and the virtual machines (VMs) scheduled on each node. The application groups machines in clusters and displays allocation per node in a graph format.
+
+## Project Structure
+
+```
+kubevirt-status-page
+├── cmd
+│   └── server
+│       └── main.go          # Entry point of the Go application
+├── internal
+│   ├── kubevirt
+│   │   ├── client.go        # KubeVirt client implementation
+│   │   └── types.go         # Data structures for KubeVirt nodes and VMs
+│   ├── cluster
+│   │   └── aggregator.go     # Logic to aggregate data from KubeVirt nodes
+│   └── sse
+│       └── handler.go       # Server-Sent Events (SSE) handler
+├── web
+│   ├── static
+│   │   ├── index.html       # Main HTML file for the frontend
+│   │   ├── style.css        # Styles for the frontend
+│   │   └── app.js           # JavaScript code for frontend logic
+│   └── embed.go             # Embedding static files into the Go binary
+├── Dockerfile                # Instructions for building the Docker image
+├── go.mod                   # Go module definition file
+├── go.sum                   # Checksums for module dependencies
+├── Makefile                 # Build and deployment commands
+└── README.md                # Project documentation
+```
+
+## Setup Instructions
+
+1. **Clone the repository:**
+   ```
+   git clone https://github.com/vitistack/kubevirt-status-page.git
+   cd kubevirt-status-page
+   ```
+
+2. **Build the application:**
+   ```
+   make build
+   ```
+
+3. **Run the application:**
+   ```
+   make run
+   ```
+
+4. **Access the status page:**
+   Open your web browser and navigate to `http://localhost:8080` to view the KubeVirt status page.
+
+## Usage
+
+The application connects to the KubeVirt cluster and retrieves information about nodes and VMs. It uses Server-Sent Events (SSE) to provide real-time updates to the frontend, ensuring that the status page reflects the current state of the cluster.
+
+## Contributing
+
+Contributions are welcome! Please open an issue or submit a pull request for any enhancements or bug fixes.
+
+## License
+
+This project is licensed under the MIT License. See the LICENSE file for more details.

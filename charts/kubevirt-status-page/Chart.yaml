@@ -1,0 +1,7 @@
+apiVersion: v2
+name: kubevirt-status-page
+description: A Helm chart for KubeVirt Status Page
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+icon: https://vitistack.io/images/viti1.svg

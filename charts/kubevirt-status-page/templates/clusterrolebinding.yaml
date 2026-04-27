@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kubevirt-status-page.fullname" . }}
+  labels:
+    {{- include "kubevirt-status-page.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kubevirt-status-page.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kubevirt-status-page.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

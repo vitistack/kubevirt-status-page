@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KubeVirt Topology</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/topology.css">
+</head>
+<body>
+    <header>
+        <h1>KubeVirt Topology</h1>
+        <nav class="nav-links">
+            <a href="/">Dashboard</a>
+            <a href="/topology.html" class="active">Topology</a>
+        </nav>
+        <span id="updated" class="updated"></span>
+        <span id="connection-status" class="connection-badge disconnected">Disconnected</span>
+    </header>
+
+    <main class="topology-main">
+        <canvas id="topology-canvas"></canvas>
+    </main>
+
+    <script src="/topology.js"></script>
+</body>
+</html>
