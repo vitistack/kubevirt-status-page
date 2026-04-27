@@ -49,14 +49,14 @@
     connectSSE();
 
     // --- Color helpers ---
-    function clusterColor(cluster) {
-        const vms = cluster.vms || [];
-        if (vms.length === 0) return "#64748b";
-        const errors = vms.filter(v => v.status && (v.status.toLowerCase().includes("error") || v.status.toLowerCase().includes("unschedulable")));
-        if (errors.length > 0) return "#ef4444";
-        const allRunning = vms.every(v => v.status === "Running");
-        if (allRunning) return "#22c55e";
-        return "#eab308";
+    function dcColor(dc) {
+        const nodes = dc.nodes || [];
+        if (nodes.length === 0) return "#64748b";
+        const allReady = nodes.every(n => n.status === "Ready");
+        const anyDown = nodes.some(n => n.status !== "Ready");
+        if (dc.stale) return "#ef4444";
+        if (anyDown) return "#eab308";
+        return "#22c55e";
     }
 
     function nodeColor(status) {
@@ -69,77 +69,26 @@
         const H = canvas.height;
         ctx.clearRect(0, 0, W, H);
 
-        // Support both hub (data.datacenters) and agent (data.nodes/clusters) mode
+        // Build datacenter list from either hub or agent payload
+        let datacenters;
         if (data.datacenters) {
-            drawHub(data.datacenters, W, H);
+            datacenters = data.datacenters;
         } else {
-            drawSingleDC(data.nodes || [], data.clusters || [], W, H);
-        }
-    }
-
-    function drawSingleDC(nodes, clusters, W, H) {
-        if (clusters.length === 0 && nodes.length === 0) {
-            ctx.fillStyle = "#64748b";
-            ctx.font = "16px sans-serif";
-            ctx.textAlign = "center";
-            ctx.fillText("No data", W / 2, H / 2);
-            return;
+            // Agent mode: single datacenter
+            datacenters = [{
+                datacenter: data.datacenter || "Datacenter",
+                nodes: data.nodes || [],
+                clusters: data.clusters || [],
+                updated: data.updated,
+                stale: false
+            }];
         }
 
-        const padding = 40;
-        const clusterBoxW = 200;
-        const clusterBoxH = 70;
-        const nodeBoxW = 220;
-        const nodeBoxH = 85;
-
-        const clusterX = padding + clusterBoxW / 2;
-        const nodeX = W - padding - nodeBoxW / 2;
-
-        const clusterSpacing = Math.min(100, (H - padding * 2) / Math.max(clusters.length, 1));
-        const nodeSpacing = Math.min(120, (H - padding * 2) / Math.max(nodes.length, 1));
-
-        const clusterTotalH = clusters.length * clusterSpacing;
-        const nodeTotalH = nodes.length * nodeSpacing;
-
-        const clusterStartY = Math.max(padding, (H - clusterTotalH) / 2);
-        const nodeStartY = Math.max(padding, (H - nodeTotalH) / 2);
-
-        const clusterPositions = clusters.map((c, i) => ({
-            x: clusterX, y: clusterStartY + i * clusterSpacing + clusterSpacing / 2, cluster: c
-        }));
-        const nodePositions = nodes.map((n, i) => ({
-            x: nodeX, y: nodeStartY + i * nodeSpacing + nodeSpacing / 2, node: n
-        }));
-
-        const nodePosMap = {};
-        nodePositions.forEach(np => { nodePosMap[np.node.name] = np; });
-
-        // Draw connections: cluster → nodes
-        clusterPositions.forEach(cp => {
-            const c = cp.cluster;
-            (c.nodes || []).forEach(nodeName => {
-                if (nodePosMap[nodeName]) {
-                    const np = nodePosMap[nodeName];
-                    drawBezier(cp.x + clusterBoxW / 2, cp.y, np.x - nodeBoxW / 2, np.y, clusterColor(c), 0.35);
-                }
-            });
-        });
-
-        // Draw cluster boxes
-        clusterPositions.forEach(cp => drawClusterBox(cp, clusterBoxW, clusterBoxH));
-
-        // Draw node boxes
-        nodePositions.forEach(np => drawNodeBox(np, nodeBoxW, nodeBoxH));
-
-        // Legend
-        drawLegend(padding, H);
+        drawTopology(datacenters, W, H);
     }
 
-    function drawHub(datacenters, W, H) {
-        // Each datacenter gets a horizontal band with its own cluster→node topology
-        const padding = 30;
-        const dcCount = datacenters.length;
-        if (dcCount === 0) {
+    function drawTopology(datacenters, W, H) {
+        if (datacenters.length === 0) {
             ctx.fillStyle = "#64748b";
             ctx.font = "16px sans-serif";
             ctx.textAlign = "center";
@@ -147,81 +96,67 @@
             return;
         }
 
-        const bandGap = 16;
-        const bandH = (H - padding * 2 - bandGap * (dcCount - 1)) / dcCount;
+        const padding = 40;
+        const dcBoxW = 220;
+        const dcBoxH = 80;
+        const nodeBoxW = 220;
+        const nodeBoxH = 85;
 
-        datacenters.forEach((dc, i) => {
-            const bandY = padding + i * (bandH + bandGap);
-            const dcName = dc.datacenter || "unknown";
-            const nodes = dc.nodes || [];
-            const clusters = dc.clusters || [];
-
-            // DC separator line & label
-            if (i > 0) {
-                ctx.strokeStyle = "#334155";
-                ctx.lineWidth = 1;
-                ctx.setLineDash([4, 4]);
-                ctx.beginPath();
-                ctx.moveTo(padding, bandY - bandGap / 2);
-                ctx.lineTo(W - padding, bandY - bandGap / 2);
-                ctx.stroke();
-                ctx.setLineDash([]);
-            }
-
-            // DC name label
-            ctx.fillStyle = dc.stale ? "#ef4444" : "#38bdf8";
-            ctx.font = "bold 13px -apple-system, sans-serif";
-            ctx.textAlign = "left";
-            ctx.textBaseline = "top";
-            ctx.fillText(dcName + (dc.stale ? " (STALE)" : ""), padding, bandY + 2);
-
-            const innerTop = bandY + 22;
-            const innerH = bandH - 26;
-
-            const clusterBoxW = 190;
-            const clusterBoxH = 60;
-            const nodeBoxW = 210;
-            const nodeBoxH = 75;
-
-            const clusterX = padding + clusterBoxW / 2 + 10;
-            const nodeX = W - padding - nodeBoxW / 2 - 10;
-
-            const clusterSpacing = Math.min(80, innerH / Math.max(clusters.length, 1));
-            const nodeSpacing = Math.min(95, innerH / Math.max(nodes.length, 1));
-
-            const clusterTotalH = clusters.length * clusterSpacing;
-            const nodeTotalH = nodes.length * nodeSpacing;
-
-            const clusterStartY = innerTop + Math.max(0, (innerH - clusterTotalH) / 2);
-            const nodeStartY = innerTop + Math.max(0, (innerH - nodeTotalH) / 2);
-
-            const clusterPositions = clusters.map((c, ci) => ({
-                x: clusterX, y: clusterStartY + ci * clusterSpacing + clusterSpacing / 2, cluster: c
-            }));
-            const nodePositions = nodes.map((n, ni) => ({
-                x: nodeX, y: nodeStartY + ni * nodeSpacing + nodeSpacing / 2, node: n
-            }));
-
-            const nodePosMap = {};
-            nodePositions.forEach(np => { nodePosMap[np.node.name] = np; });
-
-            // Draw connections
-            clusterPositions.forEach(cp => {
-                (cp.cluster.nodes || []).forEach(nodeName => {
-                    if (nodePosMap[nodeName]) {
-                        const np = nodePosMap[nodeName];
-                        drawBezier(cp.x + clusterBoxW / 2, cp.y, np.x - nodeBoxW / 2, np.y, clusterColor(cp.cluster), 0.3);
-                    }
-                });
+        // Collect all nodes across all DCs, tagged with DC name
+        const allNodes = [];
+        datacenters.forEach(dc => {
+            (dc.nodes || []).forEach(n => {
+                allNodes.push({ node: n, dcName: dc.datacenter || "unknown" });
             });
-
-            // Draw cluster boxes
-            clusterPositions.forEach(cp => drawClusterBox(cp, clusterBoxW, clusterBoxH));
-
-            // Draw node boxes
-            nodePositions.forEach(np => drawNodeBox(np, nodeBoxW, nodeBoxH));
         });
 
+        if (allNodes.length === 0 && datacenters.length === 0) {
+            ctx.fillStyle = "#64748b";
+            ctx.font = "16px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("No data", W / 2, H / 2);
+            return;
+        }
+
+        // Positions: DCs on left, nodes on right
+        const dcX = padding + dcBoxW / 2;
+        const nodeX = W - padding - nodeBoxW / 2;
+
+        const dcSpacing = Math.min(120, (H - padding * 2) / Math.max(datacenters.length, 1));
+        const nodeSpacing = Math.min(110, (H - padding * 2) / Math.max(allNodes.length, 1));
+
+        const dcTotalH = datacenters.length * dcSpacing;
+        const nodeTotalH = allNodes.length * nodeSpacing;
+
+        const dcStartY = Math.max(padding, (H - dcTotalH) / 2);
+        const nodeStartY = Math.max(padding, (H - nodeTotalH) / 2);
+
+        const dcPositions = datacenters.map((dc, i) => ({
+            x: dcX, y: dcStartY + i * dcSpacing + dcSpacing / 2, dc: dc
+        }));
+
+        const nodePositions = allNodes.map((entry, i) => ({
+            x: nodeX, y: nodeStartY + i * nodeSpacing + nodeSpacing / 2, node: entry.node, dcName: entry.dcName
+        }));
+
+        // Draw connections: DC → its nodes
+        dcPositions.forEach(dp => {
+            const dcName = dp.dc.datacenter || "unknown";
+            const color = dcColor(dp.dc);
+            nodePositions.forEach(np => {
+                if (np.dcName === dcName) {
+                    drawBezier(dp.x + dcBoxW / 2, dp.y, np.x - nodeBoxW / 2, np.y, color, 0.3);
+                }
+            });
+        });
+
+        // Draw DC boxes
+        dcPositions.forEach(dp => drawDCBox(dp, dcBoxW, dcBoxH));
+
+        // Draw node boxes
+        nodePositions.forEach(np => drawNodeBox(np, nodeBoxW, nodeBoxH));
+
+        // Legend
         drawLegend(padding, H);
     }
 
@@ -239,11 +174,13 @@
         ctx.globalAlpha = 1;
     }
 
-    function drawClusterBox(cp, boxW, boxH) {
-        const c = cp.cluster;
-        const x = cp.x - boxW / 2;
-        const y = cp.y - boxH / 2;
-        const color = clusterColor(c);
+    function drawDCBox(dp, boxW, boxH) {
+        const dc = dp.dc;
+        const x = dp.x - boxW / 2;
+        const y = dp.y - boxH / 2;
+        const color = dcColor(dc);
+        const nodes = dc.nodes || [];
+        const clusters = dc.clusters || [];
 
         // Box
         ctx.fillStyle = "#1e293b";
@@ -253,27 +190,39 @@
         ctx.fill();
         ctx.stroke();
 
-        // Cluster icon + name
-        ctx.fillStyle = "#38bdf8";
-        ctx.font = "bold 12px -apple-system, sans-serif";
+        // DC name
+        const dcName = dc.datacenter || "unknown";
+        ctx.fillStyle = dc.stale ? "#ef4444" : "#38bdf8";
+        ctx.font = "bold 13px -apple-system, sans-serif";
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
-        const displayName = c.name.length > 22 ? c.name.slice(0, 22) + "…" : c.name;
-        ctx.fillText("⎈ " + displayName, x + 10, y + 16);
+        ctx.fillText(dcName, x + 12, y + 16);
 
-        // VM summary
-        const total = (c.vms || []).length;
-        const running = (c.vms || []).filter(v => v.status === "Running").length;
-        const totalCPU = (c.vms || []).reduce((s, v) => s + v.cpuCores, 0);
-        const totalMem = (c.vms || []).reduce((s, v) => s + v.memoryMB, 0);
+        if (dc.stale) {
+            ctx.fillStyle = "#7f1d1d";
+            roundRect(ctx, x + boxW - 52, y + 8, 42, 16, 3);
+            ctx.fill();
+            ctx.fillStyle = "#fca5a5";
+            ctx.font = "bold 9px -apple-system, sans-serif";
+            ctx.fillText("STALE", x + boxW - 48, y + 16);
+        }
 
-        ctx.fillStyle = running === total ? "#6ee7b7" : "#fcd34d";
+        // Stats
+        const readyNodes = nodes.filter(n => n.status === "Ready").length;
+        let totVMs = 0, runVMs = 0;
+        nodes.forEach(n => (n.vms || []).forEach(v => { totVMs++; if (v.status === "Running") runVMs++; }));
+
+        ctx.fillStyle = readyNodes === nodes.length ? "#6ee7b7" : "#fcd34d";
         ctx.font = "11px -apple-system, sans-serif";
-        ctx.fillText(running + "/" + total + " VMs running", x + 10, y + 34);
+        ctx.textAlign = "left";
+        ctx.fillText(readyNodes + "/" + nodes.length + " nodes ready", x + 12, y + 36);
+
+        ctx.fillStyle = runVMs === totVMs ? "#6ee7b7" : "#fcd34d";
+        ctx.fillText(runVMs + "/" + totVMs + " VMs running", x + 12, y + 52);
 
         ctx.fillStyle = "#94a3b8";
         ctx.font = "10px -apple-system, sans-serif";
-        ctx.fillText(totalCPU + " vCPU · " + (totalMem / 1024).toFixed(0) + " GB · " + (c.nodes || []).length + " nodes", x + 10, y + 50);
+        ctx.fillText(clusters.length + " clusters", x + 12, y + 68);
     }
 
     function drawNodeBox(np, boxW, boxH) {
