@@ -159,8 +159,9 @@
                 const colIdx = i % 2;
                 const rowIdx = Math.floor(i / 2);
                 const colX = colIdx === 0 ? nodeCol1X : nodeCol2X;
+                const colOffset = colIdx === 1 ? nodeSpacing / 2 : 0; // stagger col2
                 nodePositions.push({
-                    x: colX, y: currentY + rowIdx * nodeSpacing + nodeSpacing / 2,
+                    x: colX, y: currentY + rowIdx * nodeSpacing + nodeSpacing / 2 + colOffset,
                     node: entry.node, dcName: entry.dcName
                 });
             });
