@@ -365,10 +365,10 @@
         const memFree = nodes.map(n => +Math.max(0, ((n.memAllocMB || n.memoryCapMB) / 1024) - (n.vms || []).reduce((s, v) => s + v.memoryMB, 0) / 1024).toFixed(1));
 
         const datasets = [
-            { label: "CPU Used", data: cpuUsed, backgroundColor: "#3b82f6", stack: "cpu", yAxisID: "y" },
-            { label: "CPU Free", data: cpuFree, backgroundColor: "#1e3a5f", stack: "cpu", yAxisID: "y" },
-            { label: "Mem Used (GB)", data: memUsed, backgroundColor: "#8b5cf6", stack: "mem", yAxisID: "y1" },
-            { label: "Mem Free (GB)", data: memFree, backgroundColor: "#3b1f6e", stack: "mem", yAxisID: "y1" }
+            { label: "CPU Used", data: cpuUsed, backgroundColor: "#3b82f6", stack: "cpu" },
+            { label: "CPU Free", data: cpuFree, backgroundColor: "#1e3a5f", stack: "cpu" },
+            { label: "Mem Used (GB)", data: memUsed, backgroundColor: "#8b5cf6", stack: "mem" },
+            { label: "Mem Free (GB)", data: memFree, backgroundColor: "#3b1f6e", stack: "mem" }
         ];
 
         if (comboChart) {
@@ -385,8 +385,7 @@
                         responsive: true, maintainAspectRatio: false, animation: false,
                         scales: {
                             x: { stacked: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
-                            y: { stacked: true, beginAtZero: true, position: "left", title: { display: true, text: "CPU (cores)", color: "#94a3b8" }, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
-                            y1: { stacked: true, beginAtZero: true, position: "right", title: { display: true, text: "Memory (GB)", color: "#94a3b8" }, ticks: { color: "#94a3b8" }, grid: { drawOnChartArea: false } }
+                            y: { stacked: true, beginAtZero: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }
                         },
                         plugins: { legend: { labels: { color: "#cbd5e1" } } }
                     }
@@ -630,10 +629,10 @@
         const memFree = nodes.map(n => +Math.max(0, ((n.memAllocMB || n.memoryCapMB) / 1024) - (n.vms || []).reduce((s, v) => s + v.memoryMB, 0) / 1024).toFixed(1));
 
         const datasets = [
-            { label: "CPU Used", data: cpuUsed, backgroundColor: "#3b82f6", stack: "cpu", yAxisID: "y" },
-            { label: "CPU Free", data: cpuFree, backgroundColor: "#1e3a5f", stack: "cpu", yAxisID: "y" },
-            { label: "Mem Used (GB)", data: memUsed, backgroundColor: "#8b5cf6", stack: "mem", yAxisID: "y1" },
-            { label: "Mem Free (GB)", data: memFree, backgroundColor: "#3b1f6e", stack: "mem", yAxisID: "y1" }
+            { label: "CPU Used", data: cpuUsed, backgroundColor: "#3b82f6", stack: "cpu" },
+            { label: "CPU Free", data: cpuFree, backgroundColor: "#1e3a5f", stack: "cpu" },
+            { label: "Mem Used (GB)", data: memUsed, backgroundColor: "#8b5cf6", stack: "mem" },
+            { label: "Mem Free (GB)", data: memFree, backgroundColor: "#3b1f6e", stack: "mem" }
         ];
 
         if (dcCharts[dcName]) {
@@ -650,8 +649,7 @@
                         responsive: true, maintainAspectRatio: false, animation: false,
                         scales: {
                             x: { stacked: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
-                            y: { stacked: true, beginAtZero: true, position: "left", title: { display: true, text: "CPU (cores)", color: "#94a3b8" }, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
-                            y1: { stacked: true, beginAtZero: true, position: "right", title: { display: true, text: "Memory (GB)", color: "#94a3b8" }, ticks: { color: "#94a3b8" }, grid: { drawOnChartArea: false } }
+                            y: { stacked: true, beginAtZero: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }
                         },
                         plugins: { legend: { labels: { color: "#cbd5e1" } } }
                     }
