@@ -188,14 +188,13 @@ func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // --- Kubernetes data fetcher ---
 
 func buildConfig() (*rest.Config, error) {
-	// Try in-cluster first
-	if cfg, err := rest.InClusterConfig(); err == nil {
-		return cfg, nil
-	}
-
-	// Fall back to kubeconfig file
+	// If KUBECONFIG is explicitly set, use it (skip in-cluster config)
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
+		// Try in-cluster first
+		if cfg, err := rest.InClusterConfig(); err == nil {
+			return cfg, nil
+		}
 		home, _ := os.UserHomeDir()
 		kubeconfig = home + "/.kube/config"
 	}
