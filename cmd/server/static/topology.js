@@ -19,17 +19,33 @@
         .then(data => { currentData = data; draw(data); })
         .catch(err => console.error("Initial fetch failed:", err));
 
+    // --- SSE for live updates ---
+    let sseErrorCount = 0;
+    let hasReceivedMessage = false;
+
     function connectSSE() {
         const es = new EventSource("/events");
         const badge = document.getElementById("connection-status");
 
+        if (!hasReceivedMessage) {
+            badge.textContent = "Connecting";
+            badge.className = "connection-badge reconnecting";
+        }
+
         es.onopen = () => {
-            badge.textContent = "Live";
-            badge.className = "connection-badge connected";
+            sseErrorCount = 0;
+            if (hasReceivedMessage) {
+                badge.textContent = "Live";
+                badge.className = "connection-badge connected";
+            }
         };
 
         es.onmessage = (e) => {
             try {
+                sseErrorCount = 0;
+                hasReceivedMessage = true;
+                badge.textContent = "Live";
+                badge.className = "connection-badge connected";
                 const data = JSON.parse(e.data);
                 currentData = data;
                 document.getElementById("updated").textContent = "Updated: " + new Date(data.updated).toLocaleTimeString();
@@ -40,8 +56,16 @@
         };
 
         es.onerror = () => {
-            badge.textContent = "Disconnected";
-            badge.className = "connection-badge disconnected";
+            sseErrorCount++;
+            if (sseErrorCount <= 1) {
+                // First miss: stay Live, just retry
+            } else if (sseErrorCount <= 3) {
+                badge.textContent = "Reconnecting";
+                badge.className = "connection-badge reconnecting";
+            } else {
+                badge.textContent = "Disconnected";
+                badge.className = "connection-badge disconnected";
+            }
             es.close();
             setTimeout(connectSSE, 3000);
         };
