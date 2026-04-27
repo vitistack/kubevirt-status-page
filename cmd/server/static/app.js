@@ -41,9 +41,66 @@
     // --- Render everything ---
     function render(data) {
         document.getElementById("updated").textContent = "Updated: " + new Date(data.updated).toLocaleTimeString();
+        renderOverview(data);
         renderClusters(data.clusters || []);
         renderNodes(data.nodes || []);
         renderCharts(data.nodes || []);
+    }
+
+    // --- Overview summary bar ---
+    function renderOverview(data) {
+        const el = document.getElementById("overview-section");
+        const nodes = data.nodes || [];
+        const clusters = data.clusters || [];
+
+        let totVMs = 0, runVMs = 0, badVMs = 0, warnVMs = 0;
+        let totCPU = 0, useCPU = 0, totMemMB = 0, useMemMB = 0;
+        let readyN = 0;
+
+        nodes.forEach(n => {
+            if (n.status === "Ready") readyN++;
+            totCPU += n.cpuAllocatable || n.cpuCapacity || 0;
+            totMemMB += n.memAllocMB || n.memoryCapMB || 0;
+            (n.vms || []).forEach(v => {
+                totVMs++;
+                if (v.status === "Running") { runVMs++; useCPU += v.cpuCores; useMemMB += v.memoryMB; }
+                else if (["Pending","Starting","Stopping","Provisioning"].includes(v.status)) warnVMs++;
+                else badVMs++;
+            });
+        });
+
+        const cpuPct = totCPU > 0 ? Math.round((useCPU / totCPU) * 100) : 0;
+        const memPct = totMemMB > 0 ? Math.round((useMemMB / totMemMB) * 100) : 0;
+
+        function pctCls(p) { return p < 60 ? "ok" : p < 85 ? "warn" : "err"; }
+
+        el.innerHTML = `<div class="overview-bar">
+            <div class="ov-item">
+                <span class="ov-label">NODES</span>
+                <span class="ov-value ${readyN === nodes.length ? "ok" : "warn"}">${readyN}/${nodes.length}</span>
+                <span class="ov-sub">ready</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">VMS</span>
+                <span class="ov-value">${totVMs}</span>
+                <span class="ov-sub">${runVMs} running</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">PROBLEMS</span>
+                <span class="ov-value ${badVMs > 0 ? "err" : "ok"}">${badVMs}</span>
+                <span class="ov-sub">${warnVMs} pending</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">CLUSTER CPU</span>
+                <span class="ov-value ${pctCls(cpuPct)}">${cpuPct}%</span>
+                <span class="ov-sub">${useCPU} / ${totCPU} cores</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">CLUSTER MEM</span>
+                <span class="ov-value ${pctCls(memPct)}">${memPct}%</span>
+                <span class="ov-sub">${(useMemMB/1024).toFixed(0)} / ${(totMemMB/1024).toFixed(0)} GB</span>
+            </div>
+        </div>`;
     }
 
     // --- Clusters ---
