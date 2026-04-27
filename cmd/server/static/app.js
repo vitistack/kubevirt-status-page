@@ -62,13 +62,41 @@
     }
     connectSSE();
 
+    // --- DC filter from URL ---
+    const urlParams = new URLSearchParams(window.location.search);
+    const filterDC = urlParams.get("dc");
+
     // --- Render everything ---
     function render(data) {
         if (data.datacenters) {
             // Hub mode: multi-datacenter payload
             document.getElementById("updated").textContent = "Updated: " + new Date(data.updated).toLocaleTimeString();
-            renderHubOverview(data.datacenters);
-            renderDatacenters(data.datacenters);
+
+            if (filterDC) {
+                // Single DC detail view
+                const dc = data.datacenters.find(d => d.datacenter === filterDC);
+                if (dc) {
+                    document.querySelector("header h1").textContent = filterDC;
+                    showBackLink();
+                    const dcData = { datacenter: dc.datacenter, nodes: dc.nodes || [], clusters: dc.clusters || [], updated: dc.updated || data.updated };
+                    renderOverview(dcData);
+                    renderClusters(dcData.clusters);
+                    renderNodes(dcData.nodes);
+                    renderCharts(dcData.nodes);
+                    // Hide DC cards section
+                    const dcSection = document.getElementById("dc-section");
+                    if (dcSection) dcSection.style.display = "none";
+                } else {
+                    document.getElementById("overview-section").innerHTML = '<p style="color:#fca5a5;padding:1rem;">Datacenter "' + escapeHtml(filterDC) + '" not found.</p>';
+                }
+            } else {
+                renderHubOverview(data.datacenters);
+                renderDatacenters(data.datacenters);
+                // Hide single-dc sections in hub view
+                document.getElementById("charts-section").style.display = "none";
+                document.getElementById("nodes-section").style.display = "none";
+                document.getElementById("clusters-section").style.display = "none";
+            }
         } else {
             // Agent mode: single datacenter
             const dcLabel = data.datacenter || "";
@@ -77,6 +105,19 @@
             renderClusters(data.clusters || []);
             renderNodes(data.nodes || []);
             renderCharts(data.nodes || []);
+        }
+    }
+
+    function showBackLink() {
+        if (document.getElementById("back-to-hub")) return;
+        const nav = document.querySelector(".nav-links");
+        if (nav) {
+            const link = document.createElement("a");
+            link.id = "back-to-hub";
+            link.href = "/";
+            link.textContent = "\u2190 All Datacenters";
+            link.className = "back-link";
+            nav.prepend(link);
         }
     }
 
@@ -583,7 +624,7 @@
                 card.className = "dc-card" + staleClass;
                 card.innerHTML = `
                     <div class="dc-header">
-                        <h2 class="dc-name">${escapeHtml(dcName)}${staleBadge}</h2>
+                        <h2 class="dc-name"><a href="/?dc=${encodeURIComponent(dcName)}" class="dc-link">${escapeHtml(dcName)}</a>${staleBadge}</h2>
                         <span class="dc-updated"></span>
                     </div>
                     <div class="overview-bar dc-overview"></div>
@@ -603,7 +644,7 @@
 
             // Update header
             card.className = "dc-card" + staleClass;
-            card.querySelector(".dc-name").innerHTML = escapeHtml(dcName) + staleBadge;
+            card.querySelector(".dc-name").innerHTML = '<a href="/?dc=' + encodeURIComponent(dcName) + '" class="dc-link">' + escapeHtml(dcName) + '</a>' + staleBadge;
             card.querySelector(".dc-updated").textContent = "Updated: " + new Date(dc.updated).toLocaleTimeString();
 
             // Update overview bar

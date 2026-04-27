@@ -32,6 +32,26 @@ header h1 {
     margin-left: auto;
 }
 
+.dc-link {
+    color: inherit;
+    text-decoration: none;
+    border-bottom: 1px dashed #475569;
+    transition: color 0.2s, border-color 0.2s;
+}
+.dc-link:hover {
+    color: #38bdf8;
+    border-bottom-color: #38bdf8;
+}
+
+.back-link {
+    color: #94a3b8;
+    text-decoration: none;
+    font-size: 0.85rem;
+}
+.back-link:hover {
+    color: #38bdf8;
+}
+
 .connection-badge {
     font-size: 0.75rem;
     padding: 4px 10px;
