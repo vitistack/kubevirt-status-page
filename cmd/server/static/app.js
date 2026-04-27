@@ -3,6 +3,7 @@
 
     let cpuChart = null;
     let memChart = null;
+    const dcCharts = {}; // { dcName: { cpu: Chart, mem: Chart } }
 
     // --- Initial load via REST ---
     fetch("/api/status")
@@ -508,7 +509,22 @@
             main.appendChild(dcContainer);
         }
 
-        dcContainer.innerHTML = datacenters.map(dc => {
+        // Track which DCs still exist
+        const activeDCs = new Set(datacenters.map(dc => dc.datacenter || "unknown"));
+
+        // Remove charts for DCs that no longer exist
+        for (const key of Object.keys(dcCharts)) {
+            if (!activeDCs.has(key)) {
+                if (dcCharts[key].cpu) dcCharts[key].cpu.destroy();
+                if (dcCharts[key].mem) dcCharts[key].mem.destroy();
+                delete dcCharts[key];
+            }
+        }
+
+        // Build or update each DC card
+        datacenters.forEach(dc => {
+            const dcName = dc.datacenter || "unknown";
+            const cardId = "dc-card-" + dcName.replace(/[^a-zA-Z0-9]/g, "-");
             const nodes = dc.nodes || [];
             const clusters = dc.clusters || [];
             const runVMs = nodes.reduce((s, n) => s + (n.vms || []).filter(v => v.status === "Running").length, 0);
@@ -524,45 +540,131 @@
             });
             const cpuPct = totCPU > 0 ? Math.round((useCPU / totCPU) * 100) : 0;
             const memPct = totMemMB > 0 ? Math.round((useMemMB / totMemMB) * 100) : 0;
-
             const staleClass = dc.stale ? " dc-stale" : "";
             const staleBadge = dc.stale ? '<span class="dc-stale-badge">STALE</span>' : "";
             const readyClusters = clusters.filter(c => (c.vms || []).every(v => v.status === "Running")).length;
-
             function pctCls(p) { return p < 60 ? "ok" : p < 85 ? "warn" : "err"; }
 
-            const clusterRows = clusters.map(c => {
-                const running = c.vms.filter(v => v.status === "Running").length;
-                const errors = c.vms.filter(v => v.status && (v.status.toLowerCase().includes("error") || v.status.toLowerCase().includes("unschedulable"))).length;
-                const cCPU = c.vms.reduce((s, v) => s + v.cpuCores, 0);
-                const cMem = c.vms.reduce((s, v) => s + v.memoryMB, 0);
-                return `<tr>
-                    <td class="cluster-name-cell">⎈ ${escapeHtml(c.name)}</td>
-                    <td>${c.vms.length}</td>
-                    <td>${running}/${c.vms.length}</td>
-                    <td>${cCPU}</td>
-                    <td>${(cMem / 1024).toFixed(1)} GB</td>
-                    <td>${c.nodes.length}</td>
-                    <td>${errors > 0 ? '<span class="status-dot error"></span>' + errors + ' error' : '<span class="status-dot ok"></span>OK'}</td>
-                </tr>`;
-            }).join("");
+            let card = document.getElementById(cardId);
+            if (!card) {
+                card = document.createElement("div");
+                card.id = cardId;
+                card.className = "dc-card" + staleClass;
+                card.innerHTML = `
+                    <div class="dc-header">
+                        <h2 class="dc-name">${escapeHtml(dcName)}${staleBadge}</h2>
+                        <span class="dc-updated"></span>
+                    </div>
+                    <div class="overview-bar dc-overview"></div>
+                    <div class="charts-row dc-charts">
+                        <div class="chart-box">
+                            <h3>CPU Allocation per Node</h3>
+                            <canvas id="${cardId}-cpu"></canvas>
+                        </div>
+                        <div class="chart-box">
+                            <h3>Memory Allocation per Node (GB)</h3>
+                            <canvas id="${cardId}-mem"></canvas>
+                        </div>
+                    </div>
+                `;
+                dcContainer.appendChild(card);
+            }
 
-            return `<div class="dc-card${staleClass}">
-                <div class="dc-header">
-                    <h2 class="dc-name">${escapeHtml(dc.datacenter || "unknown")}${staleBadge}</h2>
-                    <span class="dc-updated">Updated: ${new Date(dc.updated).toLocaleTimeString()}</span>
-                </div>
-                <div class="overview-bar dc-overview">
-                    <div class="ov-item"><span class="ov-label">CLUSTERS</span><span class="ov-value ${readyClusters === clusters.length ? "ok" : "warn"}">${readyClusters}/${clusters.length}</span></div>
-                    <div class="ov-item"><span class="ov-label">NODES</span><span class="ov-value ${readyN === nodes.length ? "ok" : "warn"}">${readyN}/${nodes.length}</span></div>
-                    <div class="ov-item"><span class="ov-label">VMS</span><span class="ov-value ${runVMs === totVMs ? "ok" : "warn"}">${runVMs}/${totVMs}</span></div>
-                    <div class="ov-item"><span class="ov-label">CPU</span><span class="ov-value ${pctCls(cpuPct)}">${cpuPct}%</span></div>
-                    <div class="ov-item"><span class="ov-label">MEM</span><span class="ov-value ${pctCls(memPct)}">${memPct}%</span></div>
-                </div>
-                ${clusters.length > 0 ? `<table class="clusters-table"><thead><tr>
-                    <th>Cluster</th><th>VMs</th><th>Running</th><th>vCPU</th><th>Memory</th><th>Nodes</th><th>Status</th>
-                </tr></thead><tbody>${clusterRows}</tbody></table>` : ""}
-            </div>`;
-        }).join("");
+            // Update header
+            card.className = "dc-card" + staleClass;
+            card.querySelector(".dc-name").innerHTML = escapeHtml(dcName) + staleBadge;
+            card.querySelector(".dc-updated").textContent = "Updated: " + new Date(dc.updated).toLocaleTimeString();
+
+            // Update overview bar
+            card.querySelector(".dc-overview").innerHTML = `
+                <div class="ov-item"><span class="ov-label">CLUSTERS</span><span class="ov-value ${readyClusters === clusters.length ? "ok" : "warn"}">${readyClusters}/${clusters.length}</span></div>
+                <div class="ov-item"><span class="ov-label">NODES</span><span class="ov-value ${readyN === nodes.length ? "ok" : "warn"}">${readyN}/${nodes.length}</span></div>
+                <div class="ov-item"><span class="ov-label">VMS</span><span class="ov-value ${runVMs === totVMs ? "ok" : "warn"}">${runVMs}/${totVMs}</span></div>
+                <div class="ov-item"><span class="ov-label">CPU</span><span class="ov-value ${pctCls(cpuPct)}">${cpuPct}%</span><span class="ov-sub">${useCPU} / ${totCPU} cores</span></div>
+                <div class="ov-item"><span class="ov-label">MEM</span><span class="ov-value ${pctCls(memPct)}">${memPct}%</span><span class="ov-sub">${(useMemMB/1024).toFixed(0)} / ${(totMemMB/1024).toFixed(0)} GB</span></div>
+            `;
+
+            // Update charts
+            renderDCCharts(dcName, cardId, nodes);
+        });
+
+        // Remove cards for DCs that no longer exist
+        const existing = dcContainer.querySelectorAll(".dc-card");
+        existing.forEach(card => {
+            const name = card.id.replace("dc-card-", "").replace(/-/g, ".");
+            // If no DC matches this card id, remove it
+            if (!datacenters.some(dc => card.id === "dc-card-" + (dc.datacenter || "unknown").replace(/[^a-zA-Z0-9]/g, "-"))) {
+                card.remove();
+            }
+        });
+    }
+
+    function renderDCCharts(dcName, cardId, nodes) {
+        const labels = nodes.map(n => n.name);
+        const cpuAllocatable = nodes.map(n => n.cpuAllocatable || n.cpuCapacity);
+        const cpuUsed = nodes.map(n => (n.vms || []).reduce((s, v) => s + v.cpuCores, 0));
+        const cpuFree = cpuAllocatable.map((cap, i) => Math.max(0, cap - cpuUsed[i]));
+        const memAllocatable = nodes.map(n => +((n.memAllocMB || n.memoryCapMB) / 1024).toFixed(1));
+        const memUsed = nodes.map(n => +((n.vms || []).reduce((s, v) => s + v.memoryMB, 0) / 1024).toFixed(1));
+        const memFree = memAllocatable.map((cap, i) => +Math.max(0, cap - memUsed[i]).toFixed(1));
+
+        const chartOpts = {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            scales: {
+                x: { stacked: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
+                y: { stacked: true, beginAtZero: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }
+            },
+            plugins: { legend: { labels: { color: "#cbd5e1" } } }
+        };
+
+        if (!dcCharts[dcName]) dcCharts[dcName] = {};
+
+        // CPU chart
+        if (dcCharts[dcName].cpu) {
+            dcCharts[dcName].cpu.data.labels = labels;
+            dcCharts[dcName].cpu.data.datasets[0].data = cpuUsed;
+            dcCharts[dcName].cpu.data.datasets[1].data = cpuFree;
+            dcCharts[dcName].cpu.update("none");
+        } else {
+            const cpuCanvas = document.getElementById(cardId + "-cpu");
+            if (cpuCanvas) {
+                dcCharts[dcName].cpu = new Chart(cpuCanvas.getContext("2d"), {
+                    type: "bar",
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            { label: "VM vCPUs", data: cpuUsed, backgroundColor: "#3b82f6" },
+                            { label: "Available", data: cpuFree, backgroundColor: "#1e3a5f" }
+                        ]
+                    },
+                    options: chartOpts
+                });
+            }
+        }
+
+        // Memory chart
+        if (dcCharts[dcName].mem) {
+            dcCharts[dcName].mem.data.labels = labels;
+            dcCharts[dcName].mem.data.datasets[0].data = memUsed;
+            dcCharts[dcName].mem.data.datasets[1].data = memFree;
+            dcCharts[dcName].mem.update("none");
+        } else {
+            const memCanvas = document.getElementById(cardId + "-mem");
+            if (memCanvas) {
+                dcCharts[dcName].mem = new Chart(memCanvas.getContext("2d"), {
+                    type: "bar",
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            { label: "VM Memory (GB)", data: memUsed, backgroundColor: "#8b5cf6" },
+                            { label: "Available (GB)", data: memFree, backgroundColor: "#3b1f6e" }
+                        ]
+                    },
+                    options: chartOpts
+                });
+            }
+        }
     }
 })();
