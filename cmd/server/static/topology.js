@@ -1,224 +1,333 @@
-(function () {
+(function() {
     "use strict";
 
-    const summaryEl = document.getElementById("topology-summary");
-    const gridEl = document.getElementById("topology-grid");
-    const updatedEl = document.getElementById("updated");
-    const connEl = document.getElementById("connection-status");
-
+    const canvas = document.getElementById("topology-canvas");
+    const ctx = canvas.getContext("2d");
     let currentData = null;
 
-    // ---- Status helpers ----
-    function isOK(status) { return status === "Running"; }
-    function isWarn(status) {
-        return status === "Pending" || status === "Starting" || status === "Stopping" || status === "Provisioning";
+    function resize() {
+        canvas.width = canvas.parentElement.clientWidth;
+        canvas.height = canvas.parentElement.clientHeight;
+        if (currentData) draw(currentData);
     }
-    function statusClass(status) {
-        if (isOK(status)) return "ok";
-        if (isWarn(status)) return "warn";
-        return "bad";
+    window.addEventListener("resize", resize);
+    resize();
+
+    // --- Data fetching ---
+    fetch("/api/status")
+        .then(r => r.json())
+        .then(data => { currentData = data; draw(data); })
+        .catch(err => console.error("Initial fetch failed:", err));
+
+    function connectSSE() {
+        const es = new EventSource("/events");
+        const badge = document.getElementById("connection-status");
+
+        es.onopen = () => {
+            badge.textContent = "Live";
+            badge.className = "connection-badge connected";
+        };
+
+        es.onmessage = (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                currentData = data;
+                document.getElementById("updated").textContent = "Updated: " + new Date(data.updated).toLocaleTimeString();
+                draw(data);
+            } catch (err) {
+                console.error("SSE parse error:", err);
+            }
+        };
+
+        es.onerror = () => {
+            badge.textContent = "Disconnected";
+            badge.className = "connection-badge disconnected";
+            es.close();
+            setTimeout(connectSSE, 3000);
+        };
     }
-    function pctClass(p) {
-        if (p < 0.6) return "ok";
-        if (p < 0.85) return "warn";
-        return "err";
+    connectSSE();
+
+    // --- Color helpers ---
+    function statusColor(status) {
+        if (!status) return "#64748b";
+        const s = status.toLowerCase();
+        if (s === "running") return "#22c55e";
+        if (s.includes("error") || s.includes("unschedulable")) return "#ef4444";
+        if (s === "scheduling" || s === "pending") return "#eab308";
+        return "#64748b";
     }
 
-    // ---- Render ----
-    function render(data) {
-        currentData = data;
+    function nodeColor(status) {
+        return status === "Ready" ? "#3b82f6" : "#ef4444";
+    }
+
+    // --- Drawing ---
+    function draw(data) {
         const nodes = data.nodes || [];
+        const W = canvas.width;
+        const H = canvas.height;
 
-        // Compute summary
-        let totVMs = 0, runVMs = 0, badVMs = 0, warnVMs = 0;
-        let totCPU = 0, useCPU = 0, totMemMB = 0, useMemMB = 0;
-        let readyN = 0;
-        nodes.forEach(n => {
-            if (n.status === "Ready") readyN++;
-            totCPU += n.cpuAllocatable || n.cpuCapacity || 0;
-            totMemMB += n.memAllocMB || n.memoryCapMB || 0;
-            (n.vms || []).forEach(v => {
-                totVMs++;
-                if (isOK(v.status)) { runVMs++; useCPU += v.cpuCores; useMemMB += v.memoryMB; }
-                else if (isWarn(v.status)) warnVMs++;
-                else badVMs++;
+        ctx.clearRect(0, 0, W, H);
+
+        if (nodes.length === 0) {
+            ctx.fillStyle = "#64748b";
+            ctx.font = "16px sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("No nodes found", W / 2, H / 2);
+            return;
+        }
+
+        // Collect all VMs (including unscheduled from clusters)
+        const allVMs = [];
+        const vmSet = new Set();
+
+        // VMs assigned to nodes
+        nodes.forEach(node => {
+            (node.vms || []).forEach(vm => {
+                if (!vmSet.has(vm.namespace + "/" + vm.name)) {
+                    vmSet.add(vm.namespace + "/" + vm.name);
+                    allVMs.push(vm);
+                }
             });
         });
 
-        // Unscheduled
-        const onNodeKeys = new Set();
-        nodes.forEach(n => (n.vms || []).forEach(vm => onNodeKeys.add(vm.namespace + "/" + vm.name)));
-        const unscheduled = [];
-        (data.clusters || []).forEach(c => (c.vms || []).forEach(vm => {
-            const k = vm.namespace + "/" + vm.name;
-            if (!onNodeKeys.has(k) && !vm.nodeName) {
-                unscheduled.push(vm);
-                onNodeKeys.add(k);
-            }
+        // VMs from clusters that might not be on any node
+        (data.clusters || []).forEach(cluster => {
+            (cluster.vms || []).forEach(vm => {
+                if (!vmSet.has(vm.namespace + "/" + vm.name)) {
+                    vmSet.add(vm.namespace + "/" + vm.name);
+                    allVMs.push(vm);
+                }
+            });
+        });
+
+        // Sort VMs by host node (matching node order), then by name within each node
+        // Unassigned VMs go at the end
+        const nodeOrder = {};
+        nodes.forEach((n, i) => { nodeOrder[n.name] = i; });
+        allVMs.sort((a, b) => {
+            const aIdx = a.nodeName && nodeOrder[a.nodeName] !== undefined ? nodeOrder[a.nodeName] : 999;
+            const bIdx = b.nodeName && nodeOrder[b.nodeName] !== undefined ? nodeOrder[b.nodeName] : 999;
+            if (aIdx !== bIdx) return aIdx - bIdx;
+            return a.name.localeCompare(b.name);
+        });
+
+        // Layout: nodes on left, VMs on right
+        const nodeBoxW = 220;
+        const nodeBoxH = 85;
+        const vmBoxW = 220;
+        const vmBoxH = 40;
+        const padding = 40;
+
+        const nodeX = padding + nodeBoxW / 2;
+        const vmX = W - padding - vmBoxW / 2;
+
+        const nodeSpacing = Math.min(130, (H - padding * 2) / Math.max(nodes.length, 1));
+        const vmSpacing = Math.min(55, (H - padding * 2) / Math.max(allVMs.length, 1));
+
+        const nodeTotalH = nodes.length * nodeSpacing;
+        const vmTotalH = allVMs.length * vmSpacing;
+
+        const nodeStartY = Math.max(padding, (H - nodeTotalH) / 2);
+        const vmStartY = Math.max(padding, (H - vmTotalH) / 2);
+
+        // Compute positions
+        const nodePositions = nodes.map((n, i) => ({
+            x: nodeX,
+            y: nodeStartY + i * nodeSpacing + nodeSpacing / 2,
+            node: n
         }));
 
-        const cpuPct = totCPU > 0 ? useCPU / totCPU : 0;
-        const memPct = totMemMB > 0 ? useMemMB / totMemMB : 0;
+        const vmPositions = allVMs.map((vm, i) => ({
+            x: vmX,
+            y: vmStartY + i * vmSpacing + vmSpacing / 2,
+            vm: vm
+        }));
 
-        // ---- Summary bar ----
-        summaryEl.innerHTML = `
-            ${summaryItem("Nodes", `${readyN}/${nodes.length}`, readyN === nodes.length ? "ok" : "warn", "ready")}
-            ${summaryItem("VMs", totVMs, "", `${runVMs} running`)}
-            ${summaryItem("Problems", badVMs, badVMs > 0 ? "err" : "ok", `${warnVMs} pending`)}
-            ${summaryItem("Cluster CPU", Math.round(cpuPct * 100) + "%", pctClass(cpuPct), `${useCPU} / ${totCPU} cores`)}
-            ${summaryItem("Cluster MEM", Math.round(memPct * 100) + "%", pctClass(memPct), `${(useMemMB/1024).toFixed(0)} / ${(totMemMB/1024).toFixed(0)} GB`)}
-            ${unscheduled.length > 0 ? summaryItem("Unscheduled", unscheduled.length, "warn", "no node assigned") : ""}
-        `;
+        // Build node name -> position lookup
+        const nodePosMap = {};
+        nodePositions.forEach(np => { nodePosMap[np.node.name] = np; });
 
-        // ---- Node cards (sorted: most-loaded first, problem nodes float to top) ----
-        const sortedNodes = nodes.slice().sort((a, b) => {
-            // NotReady first
-            if ((a.status === "Ready") !== (b.status === "Ready")) return a.status === "Ready" ? 1 : -1;
-            // Then by problem VM count desc
-            const aBad = (a.vms || []).filter(v => !isOK(v.status) && !isWarn(v.status)).length;
-            const bBad = (b.vms || []).filter(v => !isOK(v.status) && !isWarn(v.status)).length;
-            if (aBad !== bBad) return bBad - aBad;
-            // Then by CPU saturation desc
-            const aCPU = (a.vms || []).reduce((s, v) => s + v.cpuCores, 0) / (a.cpuAllocatable || a.cpuCapacity || 1);
-            const bCPU = (b.vms || []).reduce((s, v) => s + v.cpuCores, 0) / (b.cpuAllocatable || b.cpuCapacity || 1);
-            return bCPU - aCPU;
+        // Draw connections first (behind boxes)
+        vmPositions.forEach(vp => {
+            const vm = vp.vm;
+            if (vm.nodeName && nodePosMap[vm.nodeName]) {
+                const np = nodePosMap[vm.nodeName];
+                const x1 = np.x + nodeBoxW / 2;
+                const y1 = np.y;
+                const x2 = vp.x - vmBoxW / 2;
+                const y2 = vp.y;
+
+                // Bezier curve
+                const cpx = (x1 + x2) / 2;
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.bezierCurveTo(cpx, y1, cpx, y2, x2, y2);
+                ctx.strokeStyle = statusColor(vm.status);
+                ctx.globalAlpha = 0.4;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+            }
         });
 
-        gridEl.innerHTML = sortedNodes.map(renderNodeCard).join("") +
-            (unscheduled.length ? renderUnscheduledCard(unscheduled) : "");
+        // Draw node boxes
+        nodePositions.forEach(np => {
+            const n = np.node;
+            const x = np.x - nodeBoxW / 2;
+            const y = np.y - nodeBoxH / 2;
 
-        // Update header timestamp
-        if (updatedEl) updatedEl.textContent = "Updated " + new Date().toLocaleTimeString();
-    }
+            // Box
+            ctx.fillStyle = "#1e293b";
+            ctx.strokeStyle = nodeColor(n.status);
+            ctx.lineWidth = 2;
+            roundRect(ctx, x, y, nodeBoxW, nodeBoxH, 8);
+            ctx.fill();
+            ctx.stroke();
 
-    function summaryItem(label, value, cls, sub) {
-        return `<div class="summary-item">
-            <span class="summary-label">${escapeHtml(label)}</span>
-            <span class="summary-value ${cls || ""}">${escapeHtml(String(value))}</span>
-            ${sub ? `<span class="summary-sub">${escapeHtml(sub)}</span>` : ""}
-        </div>`;
-    }
+            // Status dot + Name
+            ctx.beginPath();
+            ctx.arc(x + 16, y + 16, 5, 0, Math.PI * 2);
+            ctx.fillStyle = n.status === "Ready" ? "#22c55e" : "#ef4444";
+            ctx.fill();
 
-    function renderNodeCard(n) {
-        const vms = n.vms || [];
-        const vmCPU = vms.reduce((s, v) => s + v.cpuCores, 0);
-        const cpuLimit = n.cpuAllocatable || n.cpuCapacity || 1;
-        const cpuPct = Math.min(vmCPU / cpuLimit, 1);
-        const vmMem = vms.reduce((s, v) => s + v.memoryMB, 0);
-        const memLimit = n.memAllocMB || n.memoryCapMB || 1;
-        const memPct = Math.min(vmMem / memLimit, 1);
-        const errCnt = vms.filter(v => !isOK(v.status) && !isWarn(v.status)).length;
-        const warnCnt = vms.filter(v => isWarn(v.status)).length;
+            ctx.fillStyle = "#f1f5f9";
+            ctx.font = "bold 12px -apple-system, sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            ctx.fillText(n.name, x + 28, y + 16);
 
-        // Sort VMs: bad → warn → ok (largest first within group)
-        const sortedVMs = vms.slice().sort((a, b) => {
-            const ra = isOK(a.status) ? 2 : isWarn(a.status) ? 1 : 0;
-            const rb = isOK(b.status) ? 2 : isWarn(b.status) ? 1 : 0;
-            if (ra !== rb) return ra - rb;
-            return (b.cpuCores + b.memoryMB / 1024) - (a.cpuCores + a.memoryMB / 1024);
+            // Mini CPU bar
+            const vmCPU = (n.vms || []).reduce((s, v) => s + v.cpuCores, 0);
+            const cpuLimit = n.cpuAllocatable || n.cpuCapacity || 1;
+            const cpuPct = Math.min(vmCPU / cpuLimit, 1);
+
+            const barX = x + 12;
+            const barW = nodeBoxW - 24;
+            const barH = 7;
+            const cpuBarY = y + 38;
+
+            ctx.fillStyle = "#cbd5e1";
+            ctx.font = "bold 9px -apple-system, sans-serif";
+            ctx.textBaseline = "bottom";
+            ctx.fillText("CPU", barX, cpuBarY - 2);
+            ctx.fillStyle = "#94a3b8";
+            ctx.font = "9px -apple-system, sans-serif";
+            ctx.textAlign = "right";
+            ctx.fillText(vmCPU + " / " + cpuLimit + " cores", barX + barW, cpuBarY - 2);
+            ctx.textAlign = "left";
+
+            // Bar background
+            roundRect(ctx, barX, cpuBarY, barW, barH, 3);
+            ctx.fillStyle = "#334155";
+            ctx.fill();
+            // Bar fill
+            if (cpuPct > 0) {
+                const fillW = Math.max(4, barW * cpuPct);
+                roundRect(ctx, barX, cpuBarY, fillW, barH, 3);
+                ctx.fillStyle = cpuPct < 0.5 ? "#22c55e" : cpuPct < 0.8 ? "#eab308" : "#ef4444";
+                ctx.fill();
+            }
+
+            // Mini Memory bar
+            const vmMem = (n.vms || []).reduce((s, v) => s + v.memoryMB, 0);
+            const memLimit = n.memAllocMB || n.memoryCapMB || 1;
+            const memPct = Math.min(vmMem / memLimit, 1);
+            const memBarY = cpuBarY + 22;
+
+            ctx.fillStyle = "#cbd5e1";
+            ctx.font = "bold 9px -apple-system, sans-serif";
+            ctx.textBaseline = "bottom";
+            ctx.fillText("MEM", barX, memBarY - 2);
+            ctx.fillStyle = "#94a3b8";
+            ctx.font = "9px -apple-system, sans-serif";
+            ctx.textAlign = "right";
+            ctx.fillText((vmMem / 1024).toFixed(0) + " / " + (memLimit / 1024).toFixed(0) + " GB", barX + barW, memBarY - 2);
+            ctx.textAlign = "left";
+
+            // Bar background
+            roundRect(ctx, barX, memBarY, barW, barH, 3);
+            ctx.fillStyle = "#334155";
+            ctx.fill();
+            // Bar fill
+            if (memPct > 0) {
+                const fillW = Math.max(4, barW * memPct);
+                roundRect(ctx, barX, memBarY, fillW, barH, 3);
+                ctx.fillStyle = memPct < 0.5 ? "#22c55e" : memPct < 0.8 ? "#eab308" : "#ef4444";
+                ctx.fill();
+            }
         });
 
-        const nodeClass = n.status === "Ready" ? "ready" : "notready";
+        // Draw VM boxes
+        vmPositions.forEach(vp => {
+            const vm = vp.vm;
+            const x = vp.x - vmBoxW / 2;
+            const y = vp.y - vmBoxH / 2;
 
-        return `
-        <div class="node-card ${nodeClass}">
-            <div class="node-header">
-                <div class="node-name">
-                    <span class="node-status-dot ${nodeClass}"></span>
-                    ${escapeHtml(n.name)}
-                </div>
-                <div class="node-badges">
-                    ${errCnt > 0 ? `<span class="node-badge err">${errCnt} issue${errCnt === 1 ? "" : "s"}</span>` : ""}
-                    ${warnCnt > 0 ? `<span class="node-badge" style="background:#3f2d09;color:#fde68a">${warnCnt} pending</span>` : ""}
-                    <span class="node-badge">${vms.length} VM${vms.length === 1 ? "" : "s"}</span>
-                </div>
-            </div>
+            // Box
+            ctx.fillStyle = "#1e293b";
+            ctx.strokeStyle = statusColor(vm.status);
+            ctx.lineWidth = 1.5;
+            roundRect(ctx, x, y, vmBoxW, vmBoxH, 6);
+            ctx.fill();
+            ctx.stroke();
 
-            <div class="node-sat">
-                ${satRow("CPU", cpuPct, `${vmCPU} / ${cpuLimit} cores`)}
-                ${satRow("MEM", memPct, `${(vmMem/1024).toFixed(0)} / ${(memLimit/1024).toFixed(0)} GB`)}
-            </div>
+            // Status dot
+            ctx.beginPath();
+            ctx.arc(x + 12, vp.y - 4, 4, 0, Math.PI * 2);
+            ctx.fillStyle = statusColor(vm.status);
+            ctx.fill();
 
-            <div class="node-vms">
-                ${vms.length === 0
-                    ? `<div class="vm-empty">No VMs scheduled</div>`
-                    : sortedVMs.map(vmTile).join("")}
-            </div>
-        </div>`;
+            // Name
+            ctx.fillStyle = "#e2e8f0";
+            ctx.font = "11px 'SF Mono', SFMono-Regular, monospace";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            const displayName = vm.name.length > 28 ? vm.name.slice(-28) : vm.name;
+            ctx.fillText(displayName, x + 22, vp.y - 4);
+
+            // Details
+            ctx.fillStyle = "#64748b";
+            ctx.font = "9px -apple-system, sans-serif";
+            ctx.fillText(vm.status + " · " + vm.cpuCores + " vCPU · " + (vm.memoryMB / 1024).toFixed(0) + " GB", x + 22, vp.y + 10);
+        });
+
+        // Legend
+        ctx.font = "11px -apple-system, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+
+        const legendY = H - 20;
+        const items = [
+            { color: "#22c55e", label: "Running" },
+            { color: "#ef4444", label: "Error" },
+            { color: "#eab308", label: "Pending" },
+            { color: "#64748b", label: "Unknown" }
+        ];
+        let lx = padding;
+        items.forEach(item => {
+            ctx.beginPath();
+            ctx.arc(lx + 5, legendY, 4, 0, Math.PI * 2);
+            ctx.fillStyle = item.color;
+            ctx.fill();
+            ctx.fillStyle = "#94a3b8";
+            ctx.fillText(item.label, lx + 14, legendY);
+            lx += ctx.measureText(item.label).width + 30;
+        });
     }
 
-    function satRow(label, pct, detail) {
-        const cls = pctClass(pct);
-        return `<div class="sat-row">
-            <div class="sat-head">
-                <span class="sat-label">${label}</span>
-                <span class="sat-pct">${Math.round(pct * 100)}%</span>
-            </div>
-            <div class="sat-bar"><div class="sat-fill ${cls}" style="width:${(pct * 100).toFixed(1)}%"></div></div>
-            <span class="sat-detail">${escapeHtml(detail)}</span>
-        </div>`;
-    }
-
-    function vmTile(vm) {
-        const st = statusClass(vm.status);
-        const cls = st === "ok" ? "" : st === "warn" ? "warn" : "bad";
-        const cpu = vm.cpuCores || 0;
-        const memG = ((vm.memoryMB || 0) / 1024).toFixed(0);
-        const showStatus = st !== "ok";
-        return `<div class="vm-tile ${cls}" title="${escapeHtml(vm.namespace || "")}/${escapeHtml(vm.name)} — ${escapeHtml(vm.status)}">
-            <span class="vm-name">${escapeHtml(vm.name)}</span>
-            <span class="vm-meta">
-                <span>${cpu}c</span>
-                <span>${memG}G</span>
-                ${showStatus ? `<span class="vm-status-text">${escapeHtml(vm.status)}</span>` : ""}
-            </span>
-        </div>`;
-    }
-
-    function renderUnscheduledCard(vms) {
-        const sorted = vms.slice().sort((a, b) =>
-            (b.cpuCores + b.memoryMB / 1024) - (a.cpuCores + a.memoryMB / 1024));
-        return `<div class="node-card unscheduled-card">
-            <div class="node-header">
-                <div class="node-name">
-                    <span class="node-status-dot" style="background:#eab308;box-shadow:0 0 6px #eab30888"></span>
-                    Unscheduled VMs
-                </div>
-                <div class="node-badges">
-                    <span class="node-badge" style="background:#3f2d09;color:#fde68a">${vms.length} pending placement</span>
-                </div>
-            </div>
-            <div class="node-vms">
-                ${sorted.map(vmTile).join("")}
-            </div>
-        </div>`;
-    }
-
-    function escapeHtml(s) {
-        const d = document.createElement("div");
-        d.appendChild(document.createTextNode(s == null ? "" : String(s)));
-        return d.innerHTML;
-    }
-
-    // ---- Data ----
-    fetch("/api/status")
-        .then(r => r.json())
-        .then(render)
-        .catch(err => console.error("Initial fetch failed:", err));
-
-    // SSE
-    try {
-        const es = new EventSource("/events");
-        es.onopen = () => {
-            if (connEl) { connEl.textContent = "Live"; connEl.className = "connection-badge connected"; }
-        };
-        es.onerror = () => {
-            if (connEl) { connEl.textContent = "Disconnected"; connEl.className = "connection-badge disconnected"; }
-        };
-        es.onmessage = (ev) => {
-            try { render(JSON.parse(ev.data)); } catch (e) { console.error(e); }
-        };
-    } catch (e) {
-        console.error("SSE setup failed:", e);
+    function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
     }
 })();
