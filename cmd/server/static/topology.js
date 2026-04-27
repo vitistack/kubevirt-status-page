@@ -151,7 +151,7 @@
         const nodesStartY = padding;
 
         // Right area: VM cloud
-        const cloudX = padding + nodeBoxW + 80; // gap for connector curves
+        const cloudX = padding + nodeBoxW + 90; // gap for connector curves
         const cloudY = padding;
         const cloudW = W - cloudX - padding;
         const cloudH = availH;
@@ -163,25 +163,93 @@
         const minScore = vmScores.length ? Math.min(...vmScores) : 1;
         const maxScore = vmScores.length ? Math.max(...vmScores) : 1;
 
-        // Lay out all VMs as a hex-packed grid in the cloud area
-        const placements = layoutVMCloud(allVMs, cloudX, cloudY, cloudW, cloudH, minScore, maxScore);
+        // Pick a uniform slot size that lets ALL VMs fit (across all node clusters)
+        const slot = pickSlotSize(allVMs.length, cloudW, cloudH);
 
-        // Group placements by node for connector drawing
-        const byNode = new Map();
-        placements.forEach(p => {
-            const k = p.vm.nodeName || "";
-            if (!byNode.has(k)) byNode.set(k, []);
-            byNode.get(k).push(p);
+        // Per-node cluster placement: each node gets its own region whose vertical
+        // center aligns with the node's vertical center. This makes connectors
+        // short, parallel, and easy to follow.
+        const placements = [];
+        const clusterMeta = []; // {node, cx, cy, w, h}
+
+        nodes.forEach((n, i) => {
+            const ny = nodesStartY + i * nodeStep;
+            const nodeMidY = ny + nodeBoxH / 2;
+            const vms = n.vms || [];
+            if (vms.length === 0) {
+                clusterMeta.push({ node: n, cx: cloudX + 40, cy: nodeMidY, w: 0, h: 0 });
+                return;
+            }
+            // Choose number of columns so cluster is roughly square-ish
+            const cols = Math.max(1, Math.min(
+                Math.floor(cloudW / slot),
+                Math.ceil(Math.sqrt(vms.length * 1.4))
+            ));
+            const rows = Math.ceil(vms.length / cols);
+            const rowStep = slot * 0.866;
+            const clusterW = cols * slot + slot / 2; // include hex offset
+            const clusterH = (rows - 1) * rowStep + slot;
+
+            // Available band for this node: between adjacent nodes' midpoints
+            const prevMid = i === 0 ? padding : (nodesStartY + (i - 1) * nodeStep + nodeBoxH / 2);
+            const nextMid = i === nodes.length - 1 ? (padding + availH) : (nodesStartY + (i + 1) * nodeStep + nodeBoxH / 2);
+            const bandTop = (prevMid + nodeMidY) / 2;
+            const bandBot = (nextMid + nodeMidY) / 2;
+
+            // Center cluster vertically on node's midY, but clamp inside band
+            let clusterTop = nodeMidY - clusterH / 2;
+            if (clusterTop < bandTop + 2) clusterTop = bandTop + 2;
+            if (clusterTop + clusterH > bandBot - 2) clusterTop = bandBot - 2 - clusterH;
+            // Final clamp inside cloud
+            if (clusterTop < cloudY) clusterTop = cloudY;
+            if (clusterTop + clusterH > cloudY + cloudH) clusterTop = cloudY + cloudH - clusterH;
+
+            const clusterLeft = cloudX;
+            const clusterRight = clusterLeft + clusterW;
+            clusterMeta.push({
+                node: n,
+                cx: clusterLeft + clusterW / 2,
+                cy: clusterTop + clusterH / 2,
+                left: clusterLeft,
+                right: clusterRight,
+                top: clusterTop,
+                bot: clusterTop + clusterH
+            });
+
+            // Sort: problems first (drawn at edges), then by score desc
+            const sortedVMs = vms.slice().sort((a, b) => {
+                const aOK = isOK(a.status), bOK = isOK(b.status);
+                if (aOK !== bOK) return aOK ? 1 : -1;
+                return vmScore(b) - vmScore(a);
+            });
+
+            for (let k = 0; k < sortedVMs.length; k++) {
+                const row = Math.floor(k / cols);
+                const col = k % cols;
+                const rowOff = (row % 2 === 1) ? slot / 2 : 0;
+                const dx = clusterLeft + slot / 2 + col * slot + rowOff;
+                const dy = clusterTop + slot / 2 + row * rowStep;
+                const vm = sortedVMs[k];
+                placements.push({
+                    vm: vm,
+                    x: dx,
+                    y: dy,
+                    r: radiusForSlot(vmScore(vm), slot, minScore, maxScore),
+                    slot: slot,
+                    nodeIdx: i
+                });
+            }
         });
 
-        // Draw connectors FIRST (behind boxes & dots)
+        // Draw connectors FIRST (behind boxes & dots) — one bundle per node
         nodes.forEach((n, i) => {
             const ny = nodesStartY + i * nodeStep;
             const nodeRightX = padding + nodeBoxW;
             const nodeMidY = ny + nodeBoxH / 2;
+            const cm = clusterMeta[i];
+            const places = placements.filter(p => p.nodeIdx === i);
             const nodeStrokeColor = nodeColor(n.status);
-            const places = byNode.get(n.name) || [];
-            drawConnectors(nodeRightX, nodeMidY, places, nodeStrokeColor);
+            drawClusterConnector(nodeRightX, nodeMidY, cm, places, nodeStrokeColor);
         });
 
         // Draw node boxes
@@ -207,80 +275,69 @@
         return (vm.cpuCores || 0) + (vm.memoryMB || 0) / 1024;
     }
 
-    // Lay out all VMs in a hex grid, return array of {vm, x, y, r, slot}
-    function layoutVMCloud(vms, x, y, w, h, minScore, maxScore) {
-        if (!vms.length) return [];
-
-        // Find largest slot size that fits all VMs
-        let slot = 6;
-        for (let s = 36; s >= 6; s -= 0.5) {
+    // Pick slot size large enough that totalVMs fit in cloudW x cloudH (hex packed)
+    function pickSlotSize(totalVMs, w, h) {
+        for (let s = 30; s >= 6; s -= 0.5) {
             const cols = Math.max(1, Math.floor(w / s));
             const rowStep = s * 0.866;
             const rows = Math.max(1, Math.floor(h / rowStep));
-            const cap = cols * rows;
-            if (cap >= vms.length) { slot = s; break; }
+            if (cols * rows >= totalVMs) return s;
         }
-
-        const cols = Math.max(1, Math.floor(w / slot));
-        const rowStep = slot * 0.866;
-        const maxR = slot * 0.46;
-        const minR = Math.max(2, slot * 0.22);
-
-        // Center the grid vertically within the available area
-        const usedRows = Math.ceil(vms.length / cols);
-        const gridH = (usedRows - 1) * rowStep + slot;
-        const yOffset = Math.max(0, (h - gridH) / 2);
-
-        function radiusFor(score) {
-            if (maxScore <= minScore) return (minR + maxR) / 2;
-            const t = (score - minScore) / (maxScore - minScore);
-            return minR + (maxR - minR) * Math.sqrt(t);
-        }
-
-        // Sort VMs: by node (group together), then problems first, then by score desc
-        const sorted = vms.slice().sort((a, b) => {
-            const na = a.nodeName || "", nb = b.nodeName || "";
-            if (na !== nb) return na < nb ? -1 : 1;
-            const aOK = isOK(a.status), bOK = isOK(b.status);
-            if (aOK !== bOK) return aOK ? 1 : -1;
-            return vmScore(b) - vmScore(a);
-        });
-
-        const placements = [];
-        for (let i = 0; i < sorted.length; i++) {
-            const row = Math.floor(i / cols);
-            const col = i % cols;
-            const rowOff = (row % 2 === 1) ? slot / 2 : 0;
-            const dx = x + slot / 2 + col * slot + rowOff;
-            const dy = y + yOffset + slot / 2 + row * rowStep;
-            if (dy + maxR > y + h) break;
-            if (dx + maxR > x + w) continue;
-            const vm = sorted[i];
-            placements.push({
-                vm: vm,
-                x: dx,
-                y: dy,
-                r: radiusFor(vmScore(vm)),
-                slot: slot
-            });
-        }
-        return placements;
+        return 6;
     }
 
-    function drawConnectors(srcX, srcY, places, color) {
-        if (!places.length) return;
+    function radiusForSlot(score, slot, minScore, maxScore) {
+        const maxR = slot * 0.46;
+        const minR = Math.max(2, slot * 0.22);
+        if (maxScore <= minScore) return (minR + maxR) / 2;
+        const t = (score - minScore) / (maxScore - minScore);
+        return minR + (maxR - minR) * Math.sqrt(t);
+    }
+
+    // Draw a clean "ribbon" connector from node to its cluster:
+    // a single thick translucent band + thin lines from cluster's left edge to each dot.
+    function drawClusterConnector(srcX, srcY, cm, places, color) {
+        if (!cm || !places.length) return;
+
+        // Bundle waypoint: at the cluster's left edge, vertically at cluster center
+        const bundleX = cm.left - 8;
+        const bundleY = cm.cy;
+
+        // 1. Soft "ribbon" — wide bezier from node to bundle, fades into cluster
+        const ribbonW = Math.max(6, Math.min(28, places.length * 0.6));
         ctx.strokeStyle = color;
-        ctx.globalAlpha = 0.18;
-        ctx.lineWidth = 1;
+        ctx.globalAlpha = 0.10;
+        ctx.lineWidth = ribbonW;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(srcX, srcY);
+        const cp1x = srcX + (bundleX - srcX) * 0.55;
+        const cp2x = srcX + (bundleX - srcX) * 0.45;
+        ctx.bezierCurveTo(cp1x, srcY, cp2x, bundleY, bundleX, bundleY);
+        ctx.stroke();
+
+        // 2. Thin guide line on top of ribbon
+        ctx.globalAlpha = 0.55;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(srcX, srcY);
+        ctx.bezierCurveTo(cp1x, srcY, cp2x, bundleY, bundleX, bundleY);
+        ctx.stroke();
+
+        // 3. Short fan-out from bundle to each dot — short straight-ish lines
+        ctx.globalAlpha = 0.22;
+        ctx.lineWidth = 0.6;
         for (const p of places) {
             ctx.beginPath();
-            ctx.moveTo(srcX, srcY);
-            const cp1x = srcX + (p.x - srcX) * 0.55;
-            const cp2x = srcX + (p.x - srcX) * 0.45;
-            ctx.bezierCurveTo(cp1x, srcY, cp2x, p.y, p.x, p.y);
+            ctx.moveTo(bundleX, bundleY);
+            // Quadratic curve so fan looks soft
+            const midX = (bundleX + p.x) / 2;
+            ctx.quadraticCurveTo(midX, bundleY, p.x, p.y);
             ctx.stroke();
         }
+
         ctx.globalAlpha = 1;
+        ctx.lineCap = "butt";
     }
 
     function drawVMDot(p) {
