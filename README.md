@@ -95,6 +95,13 @@ helm install kubevirt-status-page oci://ghcr.io/vitistack/helm/kubevirt-status-p
 | `kubeContext` | Kubernetes context (empty for in-cluster) | `""` |
 | `kubeconfig.secretName` | Name of secret containing kubeconfig | `""` |
 | `kubeconfig.secretKey` | Key in secret with kubeconfig data | `"kubeconfig"` |
+| `hub.enabled` | Run as hub (no k8s access needed) | `false` |
+| `hub.token` | Shared secret for agent authentication | `""` |
+| `hub.existingSecret` | Existing secret with hub token (key: `token`) | `""` |
+| `agent.datacenterName` | Label for this datacenter | `""` |
+| `agent.hubURL` | Central hub URL to push reports to | `""` |
+| `agent.hubToken` | Token for authenticating with the hub | `""` |
+| `agent.hubTokenSecret` | Existing secret with hub token (key: `token`) | `""` |
 
 ### Using an external kubeconfig
 
@@ -123,6 +130,137 @@ By default the application uses the in-cluster service account to access the Kub
    ```
 
 If the secret key is named something other than `kubeconfig`, set `kubeconfig.secretKey` accordingly.
+
+## Multi-Datacenter Setup
+
+The application supports a hub & agent architecture for monitoring multiple datacenters from a single dashboard. The same binary runs in two modes:
+
+- **Agent mode** (default): queries the local KubeVirt cluster, serves a local dashboard, and optionally pushes data to a central hub.
+- **Hub mode**: receives reports from agents, stores them in memory, and serves a combined multi-datacenter dashboard.
+
+Each agent's local dashboard remains fully functional even if the hub is unreachable.
+
+```
+  ┌─────────────┐
+  │  DC1 Agent  │──POST /api/report──┐
+  │ (local dash)│                    │
+  └─────────────┘                    ▼
+  ┌─────────────┐              ┌──────────┐
+  │  DC2 Agent  │──────────────│   Hub    │──▶ Combined dashboard
+  │ (local dash)│              └──────────┘
+  └─────────────┘                    ▲
+  ┌─────────────┐                    │
+  │  DC3 Agent  │────────────────────┘
+  │ (local dash)│
+  └─────────────┘
+```
+
+### Environment Variables
+
+| Variable | Mode | Description |
+|---|---|---|
+| `HUB_MODE` | Hub | Set to `true` to run as hub |
+| `HUB_TOKEN` | Both | Shared secret for `Authorization: Bearer` authentication |
+| `DATACENTER_NAME` | Agent | Name of this datacenter (e.g. `dc-west-1`) |
+| `HUB_URL` | Agent | URL of the central hub (e.g. `https://hub.example.com`) |
+
+### Deploying the Hub
+
+The hub does not need access to any Kubernetes cluster. Deploy it as a standalone instance:
+
+```bash
+helm install status-hub oci://ghcr.io/vitistack/helm/kubevirt-status-page \
+  --set hub.enabled=true \
+  --set hub.token="my-shared-secret" \
+  --set ingress.enabled=true \
+  --set ingress.hosts[0].host=status-hub.example.com \
+  --set ingress.hosts[0].paths[0].path=/ \
+  --set ingress.hosts[0].paths[0].pathType=ImplementationSpecific
+```
+
+### Deploying an Agent
+
+Deploy one agent per datacenter. Each agent needs access to the local KubeVirt cluster:
+
+```bash
+helm install status-agent oci://ghcr.io/vitistack/helm/kubevirt-status-page \
+  --set agent.datacenterName="dc-west-1" \
+  --set agent.hubURL="https://status-hub.example.com" \
+  --set agent.hubToken="my-shared-secret"
+```
+
+For production, store the token in a Kubernetes secret:
+
+```bash
+kubectl create secret generic hub-token --from-literal=token="my-shared-secret"
+
+helm install status-agent oci://ghcr.io/vitistack/helm/kubevirt-status-page \
+  --set agent.datacenterName="dc-west-1" \
+  --set agent.hubURL="https://status-hub.example.com" \
+  --set agent.hubTokenSecret=hub-token
+```
+
+### Stale Detection
+
+If an agent stops reporting, the hub marks that datacenter as **stale** after 30 seconds. Stale datacenters appear greyed out with a "STALE" badge on the hub dashboard.
+
+### Authentication
+
+All agent-to-hub communication uses a shared Bearer token. The agent sends `Authorization: Bearer <token>` on every `POST /api/report`. The hub validates the token and rejects requests with a missing or invalid token (HTTP 401).
+
+## Local Development with Hub & Agent
+
+You can test the full multi-datacenter setup locally using two terminal windows.
+
+### Prerequisites
+
+- Go 1.24+
+- A kubeconfig with access to a KubeVirt cluster
+
+### 1. Start the Hub
+
+The hub does not need k8s access. Run it on port 9090:
+
+```bash
+export HUB_MODE=true
+export HUB_TOKEN=dev-secret
+export PORT=9090
+go run cmd/server/main.go
+```
+
+The hub dashboard is available at `http://localhost:9090`.
+
+### 2. Start an Agent
+
+In a second terminal, start an agent pointing at your KubeVirt cluster and the local hub:
+
+```bash
+export DATACENTER_NAME=my-dc
+export HUB_URL=http://localhost:9090
+export HUB_TOKEN=dev-secret
+export KUBECONFIG=~/.kube/config
+export KUBE_CONTEXT=admin@my-cluster
+go run cmd/server/main.go
+```
+
+The agent's local dashboard is at `http://localhost:8080`. Within 5 seconds, the hub at `http://localhost:9090` will show the datacenter.
+
+### 3. Simulate Multiple Datacenters
+
+To simulate multiple agents, start additional agents on different ports with different datacenter names:
+
+```bash
+# Terminal 3
+export DATACENTER_NAME=dc-east
+export HUB_URL=http://localhost:9090
+export HUB_TOKEN=dev-secret
+export PORT=8081
+export KUBECONFIG=~/.kube/config
+export KUBE_CONTEXT=admin@other-cluster
+go run cmd/server/main.go
+```
+
+The hub will now show both `my-dc` and `dc-east` in the combined dashboard.
 
 ### Uninstall
 
