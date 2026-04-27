@@ -88,8 +88,8 @@
             </div>
             <div class="ov-item">
                 <span class="ov-label">VMS</span>
-                <span class="ov-value">${totVMs}</span>
-                <span class="ov-sub">${runVMs} running</span>
+                <span class="ov-value ${runVMs === totVMs ? "ok" : "warn"}">${runVMs}/${totVMs}</span>
+                <span class="ov-sub">running</span>
             </div>
             <div class="ov-item">
                 <span class="ov-label">PROBLEMS</span>
