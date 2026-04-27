@@ -141,16 +141,13 @@ func buildConfig() (*rest.Config, error) {
 		return cfg, nil
 	}
 
-	// Fall back to kubeconfig
+	// Fall back to kubeconfig file
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
 		home, _ := os.UserHomeDir()
 		kubeconfig = home + "/.kube/config"
 	}
 	kubeContext := os.Getenv("KUBE_CONTEXT")
-	if kubeContext == "" {
-		kubeContext = "admin@p-viti-kv01"
-	}
 
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
 		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfig},

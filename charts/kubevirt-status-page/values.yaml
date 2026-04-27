@@ -12,6 +12,15 @@ fullnameOverride: ""
 # Kubernetes context to use (leave empty to use in-cluster config)
 kubeContext: ""
 
+# External kubeconfig provided via a Kubernetes secret.
+# The secret must contain a key with the kubeconfig file content.
+# When set, the application uses this kubeconfig instead of in-cluster config.
+kubeconfig:
+  # Name of an existing secret containing the kubeconfig
+  secretName: ""
+  # Key within the secret that holds the kubeconfig data
+  secretKey: "kubeconfig"
+
 serviceAccount:
   create: true
   automount: true

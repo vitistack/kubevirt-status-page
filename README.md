@@ -93,6 +93,36 @@ helm install kubevirt-status-page oci://ghcr.io/vitistack/helm/kubevirt-status-p
 | `service.port` | Service port | `80` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `kubeContext` | Kubernetes context (empty for in-cluster) | `""` |
+| `kubeconfig.secretName` | Name of secret containing kubeconfig | `""` |
+| `kubeconfig.secretKey` | Key in secret with kubeconfig data | `"kubeconfig"` |
+
+### Using an external kubeconfig
+
+By default the application uses the in-cluster service account to access the Kubernetes API. To monitor a **remote** KubeVirt cluster, provide a kubeconfig file via a Kubernetes secret:
+
+1. Create the secret from your kubeconfig file:
+
+   ```bash
+   kubectl create secret generic kubevirt-kubeconfig \
+     --from-file=kubeconfig=/path/to/remote-kubeconfig
+   ```
+
+2. Install the chart referencing the secret:
+
+   ```bash
+   helm install kubevirt-status-page oci://ghcr.io/vitistack/helm/kubevirt-status-page \
+     --set kubeconfig.secretName=kubevirt-kubeconfig
+   ```
+
+3. Optionally select a specific context from the kubeconfig:
+
+   ```bash
+   helm install kubevirt-status-page oci://ghcr.io/vitistack/helm/kubevirt-status-page \
+     --set kubeconfig.secretName=kubevirt-kubeconfig \
+     --set kubeContext=admin@my-cluster
+   ```
+
+If the secret key is named something other than `kubeconfig`, set `kubeconfig.secretKey` accordingly.
 
 ### Uninstall
 

@@ -38,8 +38,12 @@ spec:
           {{- end }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          {{- if .Values.kubeContext }}
           env:
+          {{- if .Values.kubeconfig.secretName }}
+            - name: KUBECONFIG
+              value: /etc/kubeconfig/{{ .Values.kubeconfig.secretKey }}
+          {{- end }}
+          {{- if .Values.kubeContext }}
             - name: KUBE_CONTEXT
               value: {{ .Values.kubeContext | quote }}
           {{- end }}
@@ -63,6 +67,18 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if .Values.kubeconfig.secretName }}
+          volumeMounts:
+            - name: kubeconfig
+              mountPath: /etc/kubeconfig
+              readOnly: true
+          {{- end }}
+      {{- if .Values.kubeconfig.secretName }}
+      volumes:
+        - name: kubeconfig
+          secret:
+            secretName: {{ .Values.kubeconfig.secretName }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
