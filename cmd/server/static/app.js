@@ -71,10 +71,16 @@
 
         const cpuPct = totCPU > 0 ? Math.round((useCPU / totCPU) * 100) : 0;
         const memPct = totMemMB > 0 ? Math.round((useMemMB / totMemMB) * 100) : 0;
+        const readyClusters = clusters.filter(c => (c.vms || []).every(v => v.status === "Running")).length;
 
         function pctCls(p) { return p < 60 ? "ok" : p < 85 ? "warn" : "err"; }
 
         el.innerHTML = `<div class="overview-bar">
+            <div class="ov-item">
+                <span class="ov-label">CLUSTERS</span>
+                <span class="ov-value ${readyClusters === clusters.length ? "ok" : "warn"}">${readyClusters}/${clusters.length}</span>
+                <span class="ov-sub">healthy</span>
+            </div>
             <div class="ov-item">
                 <span class="ov-label">NODES</span>
                 <span class="ov-value ${readyN === nodes.length ? "ok" : "warn"}">${readyN}/${nodes.length}</span>
