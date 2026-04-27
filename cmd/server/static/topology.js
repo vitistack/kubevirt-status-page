@@ -118,40 +118,53 @@
             return;
         }
 
-        // Positions: DCs on left, nodes in two columns on right (alternating)
+        // Positions: DCs on left, nodes in two columns on right grouped by DC
         const dcX = padding + dcBoxW / 2;
         const colGap = 16;
+        const dcGap = 24; // vertical gap between DC groups on the node side
         const nodeCol1X = W - padding - nodeBoxW / 2 - nodeBoxW - colGap;
         const nodeCol2X = W - padding - nodeBoxW / 2;
 
         const dcSpacing = Math.min(120, (H - padding * 2) / Math.max(datacenters.length, 1));
 
-        const nodesPerCol = Math.ceil(allNodes.length / 2);
-        const nodeSpacing = Math.min(110, (H - padding * 2) / Math.max(nodesPerCol, 1));
+        // Group nodes by DC, calculate per-group layout
+        const dcGroups = datacenters.map(dc => {
+            const nodes = allNodes.filter(e => e.dcName === (dc.datacenter || "unknown"));
+            const col1 = nodes.filter((_, i) => i % 2 === 0);
+            const col2 = nodes.filter((_, i) => i % 2 === 1);
+            return { dcName: dc.datacenter || "unknown", nodes, col1Count: col1.length, col2Count: col2.length, maxRows: Math.max(col1.length, col2.length) };
+        });
+
+        const totalRows = dcGroups.reduce((s, g) => s + g.maxRows, 0);
+        const totalGaps = Math.max(dcGroups.length - 1, 0);
+        const availH = H - padding * 2 - totalGaps * dcGap;
+        const nodeSpacing = Math.min(110, availH / Math.max(totalRows, 1));
 
         const dcTotalH = datacenters.length * dcSpacing;
-        const col1Count = Math.ceil(allNodes.length / 2);
-        const col2Count = Math.floor(allNodes.length / 2);
-        const col1H = col1Count * nodeSpacing;
-        const col2H = col2Count * nodeSpacing;
+        const nodeTotalH = totalRows * nodeSpacing + totalGaps * dcGap;
 
         const dcStartY = Math.max(padding, (H - dcTotalH) / 2);
-        const col1StartY = Math.max(padding, (H - col1H) / 2);
-        const col2StartY = Math.max(padding, (H - col2H) / 2);
+        const nodeStartY = Math.max(padding, (H - nodeTotalH) / 2);
 
         const dcPositions = datacenters.map((dc, i) => ({
             x: dcX, y: dcStartY + i * dcSpacing + dcSpacing / 2, dc: dc
         }));
 
-        const nodePositions = allNodes.map((entry, i) => {
-            const colIdx = i % 2; // 0 = col1, 1 = col2
-            const rowIdx = Math.floor(i / 2);
-            const colX = colIdx === 0 ? nodeCol1X : nodeCol2X;
-            const startY = colIdx === 0 ? col1StartY : col2StartY;
-            return {
-                x: colX, y: startY + rowIdx * nodeSpacing + nodeSpacing / 2,
-                node: entry.node, dcName: entry.dcName
-            };
+        // Position nodes grouped by DC
+        const nodePositions = [];
+        let currentY = nodeStartY;
+        dcGroups.forEach(group => {
+            const nodes = allNodes.filter(e => e.dcName === group.dcName);
+            nodes.forEach((entry, i) => {
+                const colIdx = i % 2;
+                const rowIdx = Math.floor(i / 2);
+                const colX = colIdx === 0 ? nodeCol1X : nodeCol2X;
+                nodePositions.push({
+                    x: colX, y: currentY + rowIdx * nodeSpacing + nodeSpacing / 2,
+                    node: entry.node, dcName: entry.dcName
+                });
+            });
+            currentY += group.maxRows * nodeSpacing + dcGap;
         });
 
         // Draw connections: DC → its nodes
