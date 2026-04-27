@@ -136,120 +136,70 @@
             });
         });
 
-        const padding = 12;
+        const padding = 14;
         const legendH = 24;
         const unschedH = unscheduled.length > 0 ? 44 : 0;
 
-        const nodeBoxW = 200;
-        const rowGap = 4;
+        const nodeBoxW = 220;
+        const nodeBoxH = 64;
         const availH = H - padding * 2 - legendH - unschedH;
-        const rowH = Math.max(38, Math.floor((availH - (nodes.length - 1) * rowGap) / nodes.length));
 
-        // Compute global VM resource scale across all nodes for dot sizing
+        // Left column: distribute node boxes evenly to fill the full height
+        const nodeStep = nodes.length > 1
+            ? (availH - nodeBoxH) / (nodes.length - 1)
+            : 0;
+        const nodesStartY = padding;
+
+        // Right area: VM cloud
+        const cloudX = padding + nodeBoxW + 80; // gap for connector curves
+        const cloudY = padding;
+        const cloudW = W - cloudX - padding;
+        const cloudH = availH;
+
+        // Compute global resource scale for dot sizing
         const allVMs = [];
         nodes.forEach(n => (n.vms || []).forEach(v => allVMs.push(v)));
         const vmScores = allVMs.map(v => vmScore(v));
         const minScore = vmScores.length ? Math.min(...vmScores) : 1;
         const maxScore = vmScores.length ? Math.max(...vmScores) : 1;
 
-        // Draw each node row
-        nodes.forEach((n, i) => {
-            const y = padding + i * (rowH + rowGap);
-            drawNodeRow(n, padding, y, nodeBoxW, rowH, W - padding * 2, minScore, maxScore);
+        // Lay out all VMs as a hex-packed grid in the cloud area
+        const placements = layoutVMCloud(allVMs, cloudX, cloudY, cloudW, cloudH, minScore, maxScore);
+
+        // Group placements by node for connector drawing
+        const byNode = new Map();
+        placements.forEach(p => {
+            const k = p.vm.nodeName || "";
+            if (!byNode.has(k)) byNode.set(k, []);
+            byNode.get(k).push(p);
         });
+
+        // Draw connectors FIRST (behind boxes & dots)
+        nodes.forEach((n, i) => {
+            const ny = nodesStartY + i * nodeStep;
+            const nodeRightX = padding + nodeBoxW;
+            const nodeMidY = ny + nodeBoxH / 2;
+            const nodeStrokeColor = nodeColor(n.status);
+            const places = byNode.get(n.name) || [];
+            drawConnectors(nodeRightX, nodeMidY, places, nodeStrokeColor);
+        });
+
+        // Draw node boxes
+        nodes.forEach((n, i) => {
+            const ny = nodesStartY + i * nodeStep;
+            drawNodeBox(n, padding, ny, nodeBoxW, nodeBoxH);
+        });
+
+        // Draw VM dots on top
+        placements.forEach(p => drawVMDot(p));
 
         // Unscheduled VMs strip
         if (unscheduled.length > 0) {
-            const usY = padding + nodes.length * (rowH + rowGap);
+            const usY = padding + availH + 4;
             drawUnscheduled(unscheduled, padding, usY, W - padding * 2, unschedH - 8);
         }
 
         drawLegend(padding, H - legendH + 4, W - padding * 2);
-    }
-
-    function drawNodeRow(n, x, y, nodeW, rowH, totalW, minScore, maxScore) {
-        // Node box (left) — compact horizontal layout
-        ctx.fillStyle = "#1e293b";
-        ctx.strokeStyle = nodeColor(n.status);
-        ctx.lineWidth = 1.5;
-        roundRect(ctx, x, y, nodeW, rowH, 5);
-        ctx.fill();
-        ctx.stroke();
-
-        // Status dot
-        ctx.beginPath();
-        ctx.arc(x + 10, y + rowH / 2, 4, 0, Math.PI * 2);
-        ctx.fillStyle = n.status === "Ready" ? "#22c55e" : "#ef4444";
-        ctx.fill();
-
-        // Name (top line) + bars (bottom line) all in compact box
-        ctx.fillStyle = "#f1f5f9";
-        ctx.font = "bold 11px -apple-system, sans-serif";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "top";
-        ctx.fillText(n.name, x + 20, y + 5);
-
-        // CPU/MEM as a single combined mini bar group at bottom
-        const vmCPU = (n.vms || []).reduce((s, v) => s + v.cpuCores, 0);
-        const cpuLimit = n.cpuAllocatable || n.cpuCapacity || 1;
-        const cpuPct = Math.min(vmCPU / cpuLimit, 1);
-        const vmMem = (n.vms || []).reduce((s, v) => s + v.memoryMB, 0);
-        const memLimit = n.memAllocMB || n.memoryCapMB || 1;
-        const memPct = Math.min(vmMem / memLimit, 1);
-
-        const bx = x + 20;
-        const bw = nodeW - 28;
-        const bh = 3;
-        const cpuY = y + rowH - 14;
-        const memY = y + rowH - 6;
-
-        // CPU bar (no label, just thin bar with pct text inline)
-        roundRect(ctx, bx, cpuY, bw, bh, 1.5);
-        ctx.fillStyle = "#334155"; ctx.fill();
-        if (cpuPct > 0) {
-            roundRect(ctx, bx, cpuY, Math.max(2, bw * cpuPct), bh, 1.5);
-            ctx.fillStyle = cpuPct < 0.5 ? "#22c55e" : cpuPct < 0.8 ? "#eab308" : "#ef4444"; ctx.fill();
-        }
-        // MEM bar
-        roundRect(ctx, bx, memY, bw, bh, 1.5);
-        ctx.fillStyle = "#334155"; ctx.fill();
-        if (memPct > 0) {
-            roundRect(ctx, bx, memY, Math.max(2, bw * memPct), bh, 1.5);
-            ctx.fillStyle = memPct < 0.5 ? "#22c55e" : memPct < 0.8 ? "#eab308" : "#ef4444"; ctx.fill();
-        }
-
-        // Compact stats text on right side of node box
-        ctx.fillStyle = "#94a3b8";
-        ctx.font = "9px -apple-system, sans-serif";
-        ctx.textAlign = "right";
-        ctx.textBaseline = "top";
-        ctx.fillText(vmCPU + "c · " + (vmMem/1024).toFixed(0) + "G", x + nodeW - 6, y + 5);
-
-        // VMs area (right)
-        const vmsX = x + nodeW + 10;
-        const vmsW = totalW - nodeW - 10;
-        const vmsY = y + 2;
-        const vmsH = rowH - 4;
-
-        // Connector line
-        ctx.strokeStyle = "#334155";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(x + nodeW, y + rowH / 2);
-        ctx.lineTo(vmsX - 2, y + rowH / 2);
-        ctx.stroke();
-
-        drawVMs(n.vms || [], vmsX, vmsY, vmsW, vmsH, minScore, maxScore);
-
-        // VM count on far right (above VMs)
-        const cnt = (n.vms || []).length;
-        const errCnt = (n.vms || []).filter(v => !isOK(v.status)).length;
-        ctx.fillStyle = "#64748b";
-        ctx.font = "9px -apple-system, sans-serif";
-        ctx.textAlign = "right";
-        ctx.textBaseline = "top";
-        const cntText = cnt + " VMs" + (errCnt > 0 ? " · " + errCnt + " issue" : "");
-        ctx.fillText(cntText, x + totalW, y + 1);
     }
 
     // Score = vCPU + memoryGB (rough resource weight)
@@ -257,171 +207,196 @@
         return (vm.cpuCores || 0) + (vm.memoryMB || 0) / 1024;
     }
 
-    function dotRadius(score, minScore, maxScore) {
-        const minR = 3;
-        const maxR = 11;
-        if (maxScore <= minScore) return (minR + maxR) / 2;
-        const t = (score - minScore) / (maxScore - minScore);
-        // sqrt scale so area grows linearly with resource
-        return minR + (maxR - minR) * Math.sqrt(t);
-    }
+    // Lay out all VMs in a hex grid, return array of {vm, x, y, r, slot}
+    function layoutVMCloud(vms, x, y, w, h, minScore, maxScore) {
+        if (!vms.length) return [];
 
-    function drawVMs(vms, x, y, w, h, minScore, maxScore) {
-        if (vms.length === 0) {
-            ctx.fillStyle = "#475569";
-            ctx.font = "italic 10px -apple-system, sans-serif";
-            ctx.textAlign = "left";
-            ctx.textBaseline = "middle";
-            ctx.fillText("(no VMs)", x + 4, y + h / 2);
-            return;
+        // Find largest slot size that fits all VMs
+        let slot = 6;
+        for (let s = 36; s >= 6; s -= 0.5) {
+            const cols = Math.max(1, Math.floor(w / s));
+            const rowStep = s * 0.866;
+            const rows = Math.max(1, Math.floor(h / rowStep));
+            const cap = cols * rows;
+            if (cap >= vms.length) { slot = s; break; }
         }
 
-        // Sort: problem VMs first (so they get rendered as visible pills), then OK by score (largest first)
+        const cols = Math.max(1, Math.floor(w / slot));
+        const rowStep = slot * 0.866;
+        const maxR = slot * 0.46;
+        const minR = Math.max(2, slot * 0.22);
+
+        // Center the grid vertically within the available area
+        const usedRows = Math.ceil(vms.length / cols);
+        const gridH = (usedRows - 1) * rowStep + slot;
+        const yOffset = Math.max(0, (h - gridH) / 2);
+
+        function radiusFor(score) {
+            if (maxScore <= minScore) return (minR + maxR) / 2;
+            const t = (score - minScore) / (maxScore - minScore);
+            return minR + (maxR - minR) * Math.sqrt(t);
+        }
+
+        // Sort VMs: by node (group together), then problems first, then by score desc
         const sorted = vms.slice().sort((a, b) => {
+            const na = a.nodeName || "", nb = b.nodeName || "";
+            if (na !== nb) return na < nb ? -1 : 1;
             const aOK = isOK(a.status), bOK = isOK(b.status);
             if (aOK !== bOK) return aOK ? 1 : -1;
             return vmScore(b) - vmScore(a);
         });
 
-        let cx = x;
-        const cy = y + h / 2;
-
-        // Problem VMs as labeled pills
-        const bad = sorted.filter(v => !isOK(v.status));
-        ctx.font = "10px 'SF Mono', monospace";
-        for (const vm of bad) {
-            const label = shortName(vm.name);
-            const tw = ctx.measureText(label).width;
-            const pillW = tw + 18;
-            const pillH = Math.min(18, h - 2);
-            if (cx + pillW > x + w) break;
-            ctx.fillStyle = "#1e293b";
-            ctx.strokeStyle = statusColor(vm.status);
-            ctx.lineWidth = 1.5;
-            roundRect(ctx, cx, cy - pillH / 2, pillW, pillH, 4);
-            ctx.fill();
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.arc(cx + 6, cy, 3, 0, Math.PI * 2);
-            ctx.fillStyle = statusColor(vm.status);
-            ctx.fill();
-            ctx.fillStyle = "#e2e8f0";
-            ctx.textAlign = "left";
-            ctx.textBaseline = "middle";
-            ctx.fillText(label, cx + 13, cy);
-            vmHitRegions.push({ x: cx, y: cy - pillH / 2, w: pillW, h: pillH, vm: vm });
-            cx += pillW + 4;
+        const placements = [];
+        for (let i = 0; i < sorted.length; i++) {
+            const row = Math.floor(i / cols);
+            const col = i % cols;
+            const rowOff = (row % 2 === 1) ? slot / 2 : 0;
+            const dx = x + slot / 2 + col * slot + rowOff;
+            const dy = y + yOffset + slot / 2 + row * rowStep;
+            if (dy + maxR > y + h) break;
+            if (dx + maxR > x + w) continue;
+            const vm = sorted[i];
+            placements.push({
+                vm: vm,
+                x: dx,
+                y: dy,
+                r: radiusFor(vmScore(vm)),
+                slot: slot
+            });
         }
-
-        // OK VMs as scaled dots in a cloud-like scatter
-        const ok = sorted.filter(v => isOK(v.status));
-
-        // Cloud area: from current cx to right edge, full height
-        const cloudX = cx;
-        const cloudY = y;
-        const cloudW = Math.max(20, x + w - cx - 14);
-        const cloudH = h;
-
-        // Compute radii first
-        const dots = ok.map(vm => ({
-            vm: vm,
-            r: dotRadius(vmScore(vm), minScore, maxScore)
-        }));
-
-        // Place dots using a deterministic jittered grid: walk left-to-right,
-        // pick a column slot and randomly offset within the row's height
-        // Use a seeded RNG so layout is stable per render
-        const seed = (cx * 31 + ok.length * 7) | 0;
-        const rng = mulberry32(seed >>> 0);
-
-        // Keep already-placed dots; for each new dot, try jittered candidates
-        // until non-overlapping or fall back to grid sweep
-        const placed = [];
-        let cursorX = cloudX + 6;
-        let drawn = 0;
-
-        for (const d of dots) {
-            const r = d.r;
-            const minSep = 1;
-            let bestX = -1, bestY = -1;
-            // Try a handful of jittered candidates near the cursor
-            for (let tries = 0; tries < 14; tries++) {
-                const jitterY = (rng() - 0.5) * (cloudH - r * 2);
-                const jitterX = rng() * 18; // small forward jitter
-                const cxCand = cursorX + jitterX;
-                const cyCand = cloudY + cloudH / 2 + jitterY;
-                if (cxCand + r > cloudX + cloudW) break;
-                // Check no overlap with last few placed
-                let ok2 = true;
-                for (let i = placed.length - 1; i >= Math.max(0, placed.length - 40); i--) {
-                    const p = placed[i];
-                    const dx = p.x - cxCand;
-                    const dy = p.y - cyCand;
-                    if (dx * dx + dy * dy < (p.r + r + minSep) * (p.r + r + minSep)) {
-                        ok2 = false; break;
-                    }
-                }
-                if (ok2) { bestX = cxCand; bestY = cyCand; break; }
-            }
-
-            // Fallback: sweep right until it fits
-            if (bestX < 0) {
-                let sweepX = cursorX + 4;
-                while (sweepX + r <= cloudX + cloudW) {
-                    const cyCand = cloudY + cloudH / 2 + (rng() - 0.5) * (cloudH - r * 2);
-                    let ok2 = true;
-                    for (let i = placed.length - 1; i >= Math.max(0, placed.length - 40); i--) {
-                        const p = placed[i];
-                        const dx = p.x - sweepX;
-                        const dy = p.y - cyCand;
-                        if (dx * dx + dy * dy < (p.r + r + minSep) * (p.r + r + minSep)) {
-                            ok2 = false; break;
-                        }
-                    }
-                    if (ok2) { bestX = sweepX; bestY = cyCand; break; }
-                    sweepX += 2;
-                }
-            }
-
-            if (bestX < 0) break; // no more room
-
-            // Draw
-            ctx.beginPath();
-            ctx.arc(bestX, bestY, r, 0, Math.PI * 2);
-            ctx.fillStyle = "#22c55e";
-            ctx.globalAlpha = 0.92;
-            ctx.fill();
-            ctx.globalAlpha = 1;
-            ctx.strokeStyle = "#064e3b";
-            ctx.lineWidth = 1;
-            ctx.stroke();
-            vmHitRegions.push({ x: bestX - r, y: bestY - r, w: r * 2, h: r * 2, vm: d.vm });
-            placed.push({ x: bestX, y: bestY, r: r });
-            drawn++;
-            // Slowly advance cursor based on radii so the cloud spreads rightwards
-            cursorX = Math.max(cursorX, bestX - r * 1.5);
-            cursorX += r * 0.4;
-        }
-
-        if (drawn < ok.length) {
-            const remaining = ok.length - drawn;
-            ctx.fillStyle = "#94a3b8";
-            ctx.font = "9px -apple-system, sans-serif";
-            ctx.textAlign = "left";
-            ctx.textBaseline = "middle";
-            ctx.fillText("+" + remaining, cloudX + cloudW + 2, cy);
-        }
+        return placements;
     }
 
-    // Seeded PRNG (Mulberry32) for stable layouts
-    function mulberry32(a) {
-        return function() {
-            a |= 0; a = a + 0x6D2B79F5 | 0;
-            let t = a;
-            t = Math.imul(t ^ t >>> 15, t | 1);
-            t ^= t + Math.imul(t ^ t >>> 7, t | 61);
-            return ((t ^ t >>> 14) >>> 0) / 4294967296;
-        };
+    function drawConnectors(srcX, srcY, places, color) {
+        if (!places.length) return;
+        ctx.strokeStyle = color;
+        ctx.globalAlpha = 0.18;
+        ctx.lineWidth = 1;
+        for (const p of places) {
+            ctx.beginPath();
+            ctx.moveTo(srcX, srcY);
+            const cp1x = srcX + (p.x - srcX) * 0.55;
+            const cp2x = srcX + (p.x - srcX) * 0.45;
+            ctx.bezierCurveTo(cp1x, srcY, cp2x, p.y, p.x, p.y);
+            ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+    }
+
+    function drawVMDot(p) {
+        const vm = p.vm;
+        const ok = isOK(vm.status);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fillStyle = ok ? "#22c55e" : statusColor(vm.status);
+        ctx.fill();
+        ctx.strokeStyle = ok ? "#064e3b" : "#1e293b";
+        ctx.lineWidth = ok ? 0.8 : 1.2;
+        ctx.stroke();
+        if (!ok) {
+            // Add an outer ring for visibility
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.r + 2, 0, Math.PI * 2);
+            ctx.strokeStyle = statusColor(vm.status);
+            ctx.globalAlpha = 0.5;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+        }
+        vmHitRegions.push({ x: p.x - p.r, y: p.y - p.r, w: p.r * 2, h: p.r * 2, vm: vm });
+    }
+
+    function drawNodeBox(n, x, y, w, h) {
+        // Card with subtle gradient
+        const grad = ctx.createLinearGradient(x, y, x, y + h);
+        grad.addColorStop(0, "#1e293b");
+        grad.addColorStop(1, "#0f172a");
+        ctx.fillStyle = grad;
+        ctx.strokeStyle = nodeColor(n.status);
+        ctx.lineWidth = 1.5;
+        roundRect(ctx, x, y, w, h, 8);
+        ctx.fill();
+        ctx.stroke();
+
+        // Status pill in top-left
+        ctx.beginPath();
+        ctx.arc(x + 12, y + 14, 4, 0, Math.PI * 2);
+        ctx.fillStyle = n.status === "Ready" ? "#22c55e" : "#ef4444";
+        ctx.fill();
+
+        // Name
+        ctx.fillStyle = "#f1f5f9";
+        ctx.font = "bold 12px -apple-system, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(n.name, x + 22, y + 14);
+
+        // VM count + issues badge in top-right
+        const cnt = (n.vms || []).length;
+        const errCnt = (n.vms || []).filter(v => !isOK(v.status)).length;
+        ctx.fillStyle = "#94a3b8";
+        ctx.font = "10px -apple-system, sans-serif";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "middle";
+        ctx.fillText(cnt + " VM" + (cnt === 1 ? "" : "s"), x + w - 10, y + 14);
+
+        // CPU/MEM bars
+        const vmCPU = (n.vms || []).reduce((s, v) => s + v.cpuCores, 0);
+        const cpuLimit = n.cpuAllocatable || n.cpuCapacity || 1;
+        const cpuPct = Math.min(vmCPU / cpuLimit, 1);
+        const vmMem = (n.vms || []).reduce((s, v) => s + v.memoryMB, 0);
+        const memLimit = n.memAllocMB || n.memoryCapMB || 1;
+        const memPct = Math.min(vmMem / memLimit, 1);
+
+        const bx = x + 12;
+        const bw = w - 24;
+        const bh = 4;
+        const cpuY = y + 32;
+        const memY = y + 50;
+
+        // CPU label + bar
+        ctx.fillStyle = "#64748b";
+        ctx.font = "9px -apple-system, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
+        ctx.fillText("CPU", bx, cpuY - 1);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#cbd5e1";
+        ctx.fillText(vmCPU + " / " + cpuLimit, bx + bw, cpuY - 1);
+        roundRect(ctx, bx, cpuY + 2, bw, bh, 2);
+        ctx.fillStyle = "#1e293b"; ctx.fill();
+        if (cpuPct > 0) {
+            roundRect(ctx, bx, cpuY + 2, Math.max(2, bw * cpuPct), bh, 2);
+            ctx.fillStyle = cpuPct < 0.6 ? "#22c55e" : cpuPct < 0.85 ? "#eab308" : "#ef4444"; ctx.fill();
+        }
+
+        // MEM label + bar
+        ctx.fillStyle = "#64748b";
+        ctx.font = "9px -apple-system, sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText("MEM", bx, memY - 1);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "#cbd5e1";
+        ctx.fillText((vmMem/1024).toFixed(0) + " / " + (memLimit/1024).toFixed(0) + " GB", bx + bw, memY - 1);
+        roundRect(ctx, bx, memY + 2, bw, bh, 2);
+        ctx.fillStyle = "#1e293b"; ctx.fill();
+        if (memPct > 0) {
+            roundRect(ctx, bx, memY + 2, Math.max(2, bw * memPct), bh, 2);
+            ctx.fillStyle = memPct < 0.6 ? "#22c55e" : memPct < 0.85 ? "#eab308" : "#ef4444"; ctx.fill();
+        }
+
+        // Error badge if any
+        if (errCnt > 0) {
+            ctx.fillStyle = "#ef4444";
+            ctx.beginPath();
+            ctx.arc(x + w - 10, y + h - 10, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = "#fff";
+            ctx.font = "bold 8px -apple-system, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(String(errCnt), x + w - 10, y + h - 10);
+        }
     }
 
     function drawUnscheduled(vms, x, y, w, h) {
