@@ -476,11 +476,6 @@
                 <span class="ov-sub">healthy</span>
             </div>
             <div class="ov-item">
-                <span class="ov-label">REDUNDANCY</span>
-                <span class="ov-value ${totalRedundancy >= 2 ? "ok" : totalRedundancy >= 1 ? "warn" : "err"}">${totalRedundancy}</span>
-                <span class="ov-sub">node${totalRedundancy === 1 ? "" : "s"} can fail</span>
-            </div>
-            <div class="ov-item">
                 <span class="ov-label">VMS</span>
                 <span class="ov-value ${runVMs === totVMs ? "ok" : "warn"}">${runVMs}/${totVMs}</span>
                 <span class="ov-sub">running</span>
