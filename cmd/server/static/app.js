@@ -83,24 +83,7 @@
         const memPct = totMemMB > 0 ? Math.round((useMemMB / totMemMB) * 100) : 0;
         const readyClusters = clusters.filter(c => (c.vms || []).every(v => v.status === "Running")).length;
 
-        // Redundancy: how many nodes can fail and workloads still fit?
-        // Sort nodes by capacity (smallest first), greedily remove until remaining < used.
-        const sortedCaps = nodes.map(n => ({
-            cpu: n.cpuAllocatable || n.cpuCapacity || 0,
-            mem: n.memAllocMB || n.memoryCapMB || 0
-        })).sort((a, b) => (a.cpu + a.mem) - (b.cpu + b.mem));
-        let spareCPU = totCPU - useCPU;
-        let spareMem = totMemMB - useMemMB;
-        let redundantNodes = 0;
-        for (const cap of sortedCaps) {
-            if (spareCPU >= cap.cpu && spareMem >= cap.mem) {
-                redundantNodes++;
-                spareCPU -= cap.cpu;
-                spareMem -= cap.mem;
-            } else {
-                break;
-            }
-        }
+        const redundantNodes = calcRedundancy(nodes, totCPU, useCPU, totMemMB, useMemMB);
 
         function pctCls(p) { return p < 60 ? "ok" : p < 85 ? "warn" : "err"; }
 
@@ -421,6 +404,27 @@
         return div.innerHTML;
     }
 
+    // --- Redundancy calculation ---
+    function calcRedundancy(nodes, totCPU, useCPU, totMemMB, useMemMB) {
+        const sortedCaps = nodes.map(n => ({
+            cpu: n.cpuAllocatable || n.cpuCapacity || 0,
+            mem: n.memAllocMB || n.memoryCapMB || 0
+        })).sort((a, b) => (a.cpu + a.mem) - (b.cpu + b.mem));
+        let spareCPU = totCPU - useCPU;
+        let spareMem = totMemMB - useMemMB;
+        let count = 0;
+        for (const cap of sortedCaps) {
+            if (spareCPU >= cap.cpu && spareMem >= cap.mem) {
+                count++;
+                spareCPU -= cap.cpu;
+                spareMem -= cap.mem;
+            } else {
+                break;
+            }
+        }
+        return count;
+    }
+
     // --- Hub mode: multi-datacenter rendering ---
 
     function renderHubOverview(datacenters) {
@@ -450,6 +454,9 @@
         const cpuPct = totCPU > 0 ? Math.round((useCPU / totCPU) * 100) : 0;
         const memPct = totMemMB > 0 ? Math.round((useMemMB / totMemMB) * 100) : 0;
         const staleDCs = datacenters.filter(d => d.stale).length;
+        // Aggregate redundancy across all nodes from all DCs
+        const allNodes = datacenters.flatMap(dc => dc.nodes || []);
+        const totalRedundancy = calcRedundancy(allNodes, totCPU, useCPU, totMemMB, useMemMB);
         function pctCls(p) { return p < 60 ? "ok" : p < 85 ? "warn" : "err"; }
 
         el.innerHTML = `<div class="overview-bar">
@@ -467,6 +474,11 @@
                 <span class="ov-label">NODES</span>
                 <span class="ov-value ${readyNodes === totNodes ? "ok" : "warn"}">${readyNodes}/${totNodes}</span>
                 <span class="ov-sub">ready</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">REDUNDANCY</span>
+                <span class="ov-value ${totalRedundancy >= 2 ? "ok" : totalRedundancy >= 1 ? "warn" : "err"}">${totalRedundancy}</span>
+                <span class="ov-sub">node${totalRedundancy === 1 ? "" : "s"} can fail</span>
             </div>
             <div class="ov-item">
                 <span class="ov-label">VMS</span>
@@ -543,6 +555,7 @@
             const staleClass = dc.stale ? " dc-stale" : "";
             const staleBadge = dc.stale ? '<span class="dc-stale-badge">STALE</span>' : "";
             const readyClusters = clusters.filter(c => (c.vms || []).every(v => v.status === "Running")).length;
+            const dcRedundancy = calcRedundancy(nodes, totCPU, useCPU, totMemMB, useMemMB);
             function pctCls(p) { return p < 60 ? "ok" : p < 85 ? "warn" : "err"; }
 
             let card = document.getElementById(cardId);
@@ -579,6 +592,7 @@
             card.querySelector(".dc-overview").innerHTML = `
                 <div class="ov-item"><span class="ov-label">CLUSTERS</span><span class="ov-value ${readyClusters === clusters.length ? "ok" : "warn"}">${readyClusters}/${clusters.length}</span></div>
                 <div class="ov-item"><span class="ov-label">NODES</span><span class="ov-value ${readyN === nodes.length ? "ok" : "warn"}">${readyN}/${nodes.length}</span></div>
+                <div class="ov-item"><span class="ov-label">REDUNDANCY</span><span class="ov-value ${dcRedundancy >= 2 ? "ok" : dcRedundancy >= 1 ? "warn" : "err"}">${dcRedundancy}</span><span class="ov-sub">node${dcRedundancy === 1 ? "" : "s"} can fail</span></div>
                 <div class="ov-item"><span class="ov-label">VMS</span><span class="ov-value ${runVMs === totVMs ? "ok" : "warn"}">${runVMs}/${totVMs}</span></div>
                 <div class="ov-item"><span class="ov-label">CPU</span><span class="ov-value ${pctCls(cpuPct)}">${cpuPct}%</span><span class="ov-sub">${useCPU} / ${totCPU} cores</span></div>
                 <div class="ov-item"><span class="ov-label">MEM</span><span class="ov-value ${pctCls(memPct)}">${memPct}%</span><span class="ov-sub">${(useMemMB/1024).toFixed(0)} / ${(totMemMB/1024).toFixed(0)} GB</span></div>
