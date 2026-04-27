@@ -71,6 +71,28 @@ resources:
     cpu: 50m
     memory: 64Mi
 
+# Multi-datacenter mode.
+# Agent mode (default): queries local k8s and serves local dashboard.
+# Hub mode: receives reports from agents and serves combined dashboard.
+hub:
+  # Set to true to run as hub (no k8s access needed)
+  enabled: false
+  # Shared secret for agent→hub authentication (required when enabled)
+  token: ""
+  # Existing secret containing the hub token (key: "token")
+  existingSecret: ""
+
+# Agent settings (only used when hub.enabled=false)
+agent:
+  # Name of this datacenter (shown in hub dashboard)
+  datacenterName: ""
+  # URL of the central hub (e.g. https://hub.example.com). Leave empty to disable push.
+  hubURL: ""
+  # Shared token for authenticating with the hub
+  hubToken: ""
+  # Existing secret containing the hub token (key: "token")
+  hubTokenSecret: ""
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

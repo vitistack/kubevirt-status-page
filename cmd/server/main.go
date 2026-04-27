@@ -1,16 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -57,9 +61,57 @@ type ClusterGroup struct {
 }
 
 type StatusData struct {
-	Nodes    []NodeInfo     `json:"nodes"`
-	Clusters []ClusterGroup `json:"clusters"`
-	Updated  string         `json:"updated"`
+	Datacenter string         `json:"datacenter,omitempty"`
+	Nodes      []NodeInfo     `json:"nodes"`
+	Clusters   []ClusterGroup `json:"clusters"`
+	Updated    string         `json:"updated"`
+}
+
+// HubData is the combined payload the hub sends to frontends.
+type HubData struct {
+	Datacenters []DCStatus `json:"datacenters"`
+	Updated     string     `json:"updated"`
+}
+
+// DCStatus is one datacenter's snapshot as stored in the hub.
+type DCStatus struct {
+	StatusData
+	Stale bool `json:"stale"`
+}
+
+// dcStore holds the latest report from each agent.
+type dcStore struct {
+	mu    sync.RWMutex
+	dcs   map[string]*dcEntry
+	stale time.Duration
+}
+
+type dcEntry struct {
+	data     StatusData
+	received time.Time
+}
+
+func newDCStore(staleDuration time.Duration) *dcStore {
+	return &dcStore{dcs: make(map[string]*dcEntry), stale: staleDuration}
+}
+
+func (s *dcStore) update(d StatusData) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dcs[d.Datacenter] = &dcEntry{data: d, received: time.Now()}
+}
+
+func (s *dcStore) snapshot() HubData {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []DCStatus
+	now := time.Now()
+	for _, e := range s.dcs {
+		ds := DCStatus{StatusData: e.data, Stale: now.Sub(e.received) > s.stale}
+		out = append(out, ds)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Datacenter < out[j].Datacenter })
+	return HubData{Datacenters: out, Updated: time.Now().Format(time.RFC3339)}
 }
 
 // --- SSE ---
@@ -389,71 +441,148 @@ func parseMemoryToMB(s string) int64 {
 func main() {
 	log.SetFlags(log.Ltime | log.Lshortfile)
 
-	cfg, err := buildConfig()
-	if err != nil {
-		log.Fatalf("Failed to build kubeconfig: %v", err)
-	}
-
-	k8s, err := kubernetes.NewForConfig(cfg)
-	if err != nil {
-		log.Fatalf("Failed to create k8s client: %v", err)
-	}
-
-	dynClient, err := dynamic.NewForConfig(cfg)
-	if err != nil {
-		log.Fatalf("Failed to create dynamic client: %v", err)
-	}
+	hubMode := strings.EqualFold(os.Getenv("HUB_MODE"), "true")
+	hubToken := os.Getenv("HUB_TOKEN")
 
 	broker := NewSSEBroker()
-
-	interval := 5 * time.Second
+	mux := http.NewServeMux()
+	mux.Handle("/events", broker)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Background poller
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+	if hubMode {
+		// ---- Hub mode: receive reports from agents, serve combined view ----
+		store := newDCStore(30 * time.Second)
 
-		doFetch := func() {
-			data, err := fetchStatus(ctx, k8s, dynClient)
+		mux.HandleFunc("/api/report", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST only", http.StatusMethodNotAllowed)
+				return
+			}
+			if hubToken != "" {
+				auth := r.Header.Get("Authorization")
+				if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(auth[7:]), []byte(hubToken)) != 1 {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
+			body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // 10 MB max
 			if err != nil {
-				log.Printf("Error fetching status: %v", err)
+				http.Error(w, "read error", http.StatusBadRequest)
 				return
 			}
-			jsonData, err := json.Marshal(data)
-			if err != nil {
-				log.Printf("Error marshaling data: %v", err)
+			var sd StatusData
+			if err := json.Unmarshal(body, &sd); err != nil {
+				http.Error(w, "bad json", http.StatusBadRequest)
 				return
 			}
-			broker.Broadcast(jsonData)
-		}
-
-		doFetch()
-		for {
-			select {
-			case <-ctx.Done():
+			if sd.Datacenter == "" {
+				http.Error(w, "datacenter field required", http.StatusBadRequest)
 				return
-			case <-ticker.C:
-				doFetch()
 			}
-		}
-	}()
+			store.update(sd)
+			w.WriteHeader(http.StatusNoContent)
+		})
 
-	mux := http.NewServeMux()
-	mux.Handle("/events", broker)
+		mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(store.snapshot())
+		})
 
-	// One-shot API endpoint for initial data load
-	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		data, err := fetchStatus(r.Context(), k8s, dynClient)
+		// Broadcast combined snapshot every 5 seconds
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					snap := store.snapshot()
+					jsonData, _ := json.Marshal(snap)
+					broker.Broadcast(jsonData)
+				}
+			}
+		}()
+
+		log.Println("Running in HUB mode")
+	} else {
+		// ---- Agent mode: query local k8s, serve local dashboard ----
+		cfg, err := buildConfig()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			log.Fatalf("Failed to build kubeconfig: %v", err)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(data)
-	})
+
+		k8s, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			log.Fatalf("Failed to create k8s client: %v", err)
+		}
+
+		dynClient, err := dynamic.NewForConfig(cfg)
+		if err != nil {
+			log.Fatalf("Failed to create dynamic client: %v", err)
+		}
+
+		dcName := os.Getenv("DATACENTER_NAME")
+		hubURL := os.Getenv("HUB_URL") // e.g. https://hub.example.com
+
+		interval := 5 * time.Second
+
+		// Background poller
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+
+			httpClient := &http.Client{Timeout: 10 * time.Second}
+
+			doFetch := func() {
+				data, err := fetchStatus(ctx, k8s, dynClient)
+				if err != nil {
+					log.Printf("Error fetching status: %v", err)
+					return
+				}
+				data.Datacenter = dcName
+
+				jsonData, err := json.Marshal(data)
+				if err != nil {
+					log.Printf("Error marshaling data: %v", err)
+					return
+				}
+				broker.Broadcast(jsonData)
+
+				// Push to hub if configured
+				if hubURL != "" {
+					go pushToHub(httpClient, hubURL, hubToken, jsonData)
+				}
+			}
+
+			doFetch()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					doFetch()
+				}
+			}
+		}()
+
+		mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+			data, err := fetchStatus(r.Context(), k8s, dynClient)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			data.Datacenter = dcName
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(data)
+		})
+
+		if dcName != "" {
+			log.Printf("Running in AGENT mode, datacenter=%s", dcName)
+		}
+	}
 
 	// Serve embedded static files
 	staticFS, err := fs.Sub(staticFiles, "static")
@@ -488,5 +617,27 @@ func main() {
 	log.Printf("Listening on %s", addr)
 	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
+	}
+}
+
+func pushToHub(client *http.Client, hubURL, token string, data []byte) {
+	url := strings.TrimRight(hubURL, "/") + "/api/report"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
+	if err != nil {
+		log.Printf("Hub push: request error: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Hub push: %v", err)
+		return
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		log.Printf("Hub push: status %d", resp.StatusCode)
 	}
 }

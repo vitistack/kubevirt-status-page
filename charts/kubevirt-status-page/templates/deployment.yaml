@@ -39,6 +39,20 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+          {{- if .Values.hub.enabled }}
+            - name: HUB_MODE
+              value: "true"
+            {{- if .Values.hub.existingSecret }}
+            - name: HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.hub.existingSecret }}
+                  key: token
+            {{- else if .Values.hub.token }}
+            - name: HUB_TOKEN
+              value: {{ .Values.hub.token | quote }}
+            {{- end }}
+          {{- else }}
           {{- if .Values.kubeconfig.secretName }}
             - name: KUBECONFIG
               value: /etc/kubeconfig/{{ .Values.kubeconfig.secretKey }}
@@ -46,6 +60,25 @@ spec:
           {{- if .Values.kubeContext }}
             - name: KUBE_CONTEXT
               value: {{ .Values.kubeContext | quote }}
+          {{- end }}
+          {{- if .Values.agent.datacenterName }}
+            - name: DATACENTER_NAME
+              value: {{ .Values.agent.datacenterName | quote }}
+          {{- end }}
+          {{- if .Values.agent.hubURL }}
+            - name: HUB_URL
+              value: {{ .Values.agent.hubURL | quote }}
+          {{- end }}
+          {{- if .Values.agent.hubTokenSecret }}
+            - name: HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agent.hubTokenSecret }}
+                  key: token
+          {{- else if .Values.agent.hubToken }}
+            - name: HUB_TOKEN
+              value: {{ .Values.agent.hubToken | quote }}
+          {{- end }}
           {{- end }}
           ports:
             - name: http

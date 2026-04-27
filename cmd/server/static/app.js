@@ -40,11 +40,20 @@
 
     // --- Render everything ---
     function render(data) {
-        document.getElementById("updated").textContent = "Updated: " + new Date(data.updated).toLocaleTimeString();
-        renderOverview(data);
-        renderClusters(data.clusters || []);
-        renderNodes(data.nodes || []);
-        renderCharts(data.nodes || []);
+        if (data.datacenters) {
+            // Hub mode: multi-datacenter payload
+            document.getElementById("updated").textContent = "Updated: " + new Date(data.updated).toLocaleTimeString();
+            renderHubOverview(data.datacenters);
+            renderDatacenters(data.datacenters);
+        } else {
+            // Agent mode: single datacenter
+            const dcLabel = data.datacenter || "";
+            document.getElementById("updated").textContent = "Updated: " + new Date(data.updated).toLocaleTimeString();
+            renderOverview(data);
+            renderClusters(data.clusters || []);
+            renderNodes(data.nodes || []);
+            renderCharts(data.nodes || []);
+        }
     }
 
     // --- Overview summary bar ---
@@ -409,5 +418,151 @@
         const div = document.createElement("div");
         div.appendChild(document.createTextNode(str));
         return div.innerHTML;
+    }
+
+    // --- Hub mode: multi-datacenter rendering ---
+
+    function renderHubOverview(datacenters) {
+        const el = document.getElementById("overview-section");
+        let totNodes = 0, readyNodes = 0, totVMs = 0, runVMs = 0, badVMs = 0;
+        let totCPU = 0, useCPU = 0, totMemMB = 0, useMemMB = 0;
+        let totClusters = 0, readyClusters = 0;
+
+        datacenters.forEach(dc => {
+            const nodes = dc.nodes || [];
+            const clusters = dc.clusters || [];
+            totClusters += clusters.length;
+            readyClusters += clusters.filter(c => (c.vms || []).every(v => v.status === "Running")).length;
+            nodes.forEach(n => {
+                totNodes++;
+                if (n.status === "Ready") readyNodes++;
+                totCPU += n.cpuAllocatable || n.cpuCapacity || 0;
+                totMemMB += n.memAllocMB || n.memoryCapMB || 0;
+                (n.vms || []).forEach(v => {
+                    totVMs++;
+                    if (v.status === "Running") { runVMs++; useCPU += v.cpuCores; useMemMB += v.memoryMB; }
+                    else if (!["Pending","Starting","Stopping","Provisioning"].includes(v.status)) badVMs++;
+                });
+            });
+        });
+
+        const cpuPct = totCPU > 0 ? Math.round((useCPU / totCPU) * 100) : 0;
+        const memPct = totMemMB > 0 ? Math.round((useMemMB / totMemMB) * 100) : 0;
+        const staleDCs = datacenters.filter(d => d.stale).length;
+        function pctCls(p) { return p < 60 ? "ok" : p < 85 ? "warn" : "err"; }
+
+        el.innerHTML = `<div class="overview-bar">
+            <div class="ov-item">
+                <span class="ov-label">DATACENTERS</span>
+                <span class="ov-value ${staleDCs > 0 ? "warn" : "ok"}">${datacenters.length - staleDCs}/${datacenters.length}</span>
+                <span class="ov-sub">reporting</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">CLUSTERS</span>
+                <span class="ov-value ${readyClusters === totClusters ? "ok" : "warn"}">${readyClusters}/${totClusters}</span>
+                <span class="ov-sub">healthy</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">NODES</span>
+                <span class="ov-value ${readyNodes === totNodes ? "ok" : "warn"}">${readyNodes}/${totNodes}</span>
+                <span class="ov-sub">ready</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">VMS</span>
+                <span class="ov-value ${runVMs === totVMs ? "ok" : "warn"}">${runVMs}/${totVMs}</span>
+                <span class="ov-sub">running</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">PROBLEMS</span>
+                <span class="ov-value ${badVMs > 0 ? "err" : "ok"}">${badVMs}</span>
+                <span class="ov-sub">errors</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">TOTAL CPU</span>
+                <span class="ov-value ${pctCls(cpuPct)}">${cpuPct}%</span>
+                <span class="ov-sub">${useCPU} / ${totCPU} cores</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">TOTAL MEM</span>
+                <span class="ov-value ${pctCls(memPct)}">${memPct}%</span>
+                <span class="ov-sub">${(useMemMB/1024).toFixed(0)} / ${(totMemMB/1024).toFixed(0)} GB</span>
+            </div>
+        </div>`;
+    }
+
+    function renderDatacenters(datacenters) {
+        // Hide single-DC sections
+        const chartsSection = document.getElementById("charts-section");
+        const nodesSection = document.getElementById("nodes-section");
+        const clustersSection = document.getElementById("clusters-section");
+        chartsSection.style.display = "none";
+        nodesSection.style.display = "none";
+        clustersSection.style.display = "none";
+
+        // Get or create DC container
+        let dcContainer = document.getElementById("dc-container");
+        if (!dcContainer) {
+            dcContainer = document.createElement("section");
+            dcContainer.id = "dc-container";
+            const main = document.querySelector("main");
+            main.appendChild(dcContainer);
+        }
+
+        dcContainer.innerHTML = datacenters.map(dc => {
+            const nodes = dc.nodes || [];
+            const clusters = dc.clusters || [];
+            const runVMs = nodes.reduce((s, n) => s + (n.vms || []).filter(v => v.status === "Running").length, 0);
+            const totVMs = nodes.reduce((s, n) => s + (n.vms || []).length, 0);
+            const readyN = nodes.filter(n => n.status === "Ready").length;
+            let useCPU = 0, totCPU = 0, useMemMB = 0, totMemMB = 0;
+            nodes.forEach(n => {
+                totCPU += n.cpuAllocatable || n.cpuCapacity || 0;
+                totMemMB += n.memAllocMB || n.memoryCapMB || 0;
+                (n.vms || []).forEach(v => {
+                    if (v.status === "Running") { useCPU += v.cpuCores; useMemMB += v.memoryMB; }
+                });
+            });
+            const cpuPct = totCPU > 0 ? Math.round((useCPU / totCPU) * 100) : 0;
+            const memPct = totMemMB > 0 ? Math.round((useMemMB / totMemMB) * 100) : 0;
+
+            const staleClass = dc.stale ? " dc-stale" : "";
+            const staleBadge = dc.stale ? '<span class="dc-stale-badge">STALE</span>' : "";
+            const readyClusters = clusters.filter(c => (c.vms || []).every(v => v.status === "Running")).length;
+
+            function pctCls(p) { return p < 60 ? "ok" : p < 85 ? "warn" : "err"; }
+
+            const clusterRows = clusters.map(c => {
+                const running = c.vms.filter(v => v.status === "Running").length;
+                const errors = c.vms.filter(v => v.status && (v.status.toLowerCase().includes("error") || v.status.toLowerCase().includes("unschedulable"))).length;
+                const cCPU = c.vms.reduce((s, v) => s + v.cpuCores, 0);
+                const cMem = c.vms.reduce((s, v) => s + v.memoryMB, 0);
+                return `<tr>
+                    <td class="cluster-name-cell">⎈ ${escapeHtml(c.name)}</td>
+                    <td>${c.vms.length}</td>
+                    <td>${running}/${c.vms.length}</td>
+                    <td>${cCPU}</td>
+                    <td>${(cMem / 1024).toFixed(1)} GB</td>
+                    <td>${c.nodes.length}</td>
+                    <td>${errors > 0 ? '<span class="status-dot error"></span>' + errors + ' error' : '<span class="status-dot ok"></span>OK'}</td>
+                </tr>`;
+            }).join("");
+
+            return `<div class="dc-card${staleClass}">
+                <div class="dc-header">
+                    <h2 class="dc-name">${escapeHtml(dc.datacenter || "unknown")}${staleBadge}</h2>
+                    <span class="dc-updated">Updated: ${new Date(dc.updated).toLocaleTimeString()}</span>
+                </div>
+                <div class="overview-bar dc-overview">
+                    <div class="ov-item"><span class="ov-label">CLUSTERS</span><span class="ov-value ${readyClusters === clusters.length ? "ok" : "warn"}">${readyClusters}/${clusters.length}</span></div>
+                    <div class="ov-item"><span class="ov-label">NODES</span><span class="ov-value ${readyN === nodes.length ? "ok" : "warn"}">${readyN}/${nodes.length}</span></div>
+                    <div class="ov-item"><span class="ov-label">VMS</span><span class="ov-value ${runVMs === totVMs ? "ok" : "warn"}">${runVMs}/${totVMs}</span></div>
+                    <div class="ov-item"><span class="ov-label">CPU</span><span class="ov-value ${pctCls(cpuPct)}">${cpuPct}%</span></div>
+                    <div class="ov-item"><span class="ov-label">MEM</span><span class="ov-value ${pctCls(memPct)}">${memPct}%</span></div>
+                </div>
+                ${clusters.length > 0 ? `<table class="clusters-table"><thead><tr>
+                    <th>Cluster</th><th>VMs</th><th>Running</th><th>vCPU</th><th>Memory</th><th>Nodes</th><th>Status</th>
+                </tr></thead><tbody>${clusterRows}</tbody></table>` : ""}
+            </div>`;
+        }).join("");
     }
 })();
