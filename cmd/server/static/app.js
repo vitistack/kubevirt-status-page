@@ -47,10 +47,50 @@
     }
 
     // --- Clusters ---
+    const COMPACT_THRESHOLD = 6;
+
     function renderClusters(clusters) {
         const container = document.getElementById("clusters-container");
         container.innerHTML = "";
 
+        if (clusters.length > COMPACT_THRESHOLD) {
+            renderClustersCompact(clusters, container);
+        } else {
+            renderClustersExpanded(clusters, container);
+        }
+    }
+
+    function renderClustersCompact(clusters, container) {
+        container.className = "clusters-table-wrap";
+        const table = document.createElement("table");
+        table.className = "clusters-table";
+        table.innerHTML = `<thead><tr>
+            <th>Cluster</th><th>VMs</th><th>Running</th><th>vCPU</th><th>Memory</th><th>Nodes</th><th>Status</th>
+        </tr></thead>`;
+        const tbody = document.createElement("tbody");
+        clusters.forEach(cluster => {
+            const totalCPU = cluster.vms.reduce((s, v) => s + v.cpuCores, 0);
+            const totalMem = cluster.vms.reduce((s, v) => s + v.memoryMB, 0);
+            const running = cluster.vms.filter(v => v.status === "Running").length;
+            const errors = cluster.vms.filter(v => v.status && (v.status.toLowerCase().includes("error") || v.status.toLowerCase().includes("unschedulable"))).length;
+            const tr = document.createElement("tr");
+            tr.innerHTML = `
+                <td class="cluster-name-cell">⎈ ${escapeHtml(cluster.name)}</td>
+                <td>${cluster.vms.length}</td>
+                <td>${running}/${cluster.vms.length}</td>
+                <td>${totalCPU}</td>
+                <td>${(totalMem / 1024).toFixed(1)} GB</td>
+                <td>${cluster.nodes.length}</td>
+                <td>${errors > 0 ? '<span class="status-dot error"></span>' + errors + ' error' : '<span class="status-dot ok"></span>OK'}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        container.appendChild(table);
+    }
+
+    function renderClustersExpanded(clusters, container) {
+        container.className = "clusters-grid";
         clusters.forEach(cluster => {
             const card = document.createElement("div");
             card.className = "cluster-card";

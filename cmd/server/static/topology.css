@@ -11,6 +11,32 @@
     background: #0f172a;
 }
 
+.topology-tooltip {
+    position: fixed;
+    display: none;
+    background: #0f172a;
+    border: 1px solid #475569;
+    color: #e2e8f0;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 0.78rem;
+    font-family: -apple-system, "system-ui", sans-serif;
+    pointer-events: none;
+    z-index: 1000;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    max-width: 320px;
+}
+.topology-tooltip strong {
+    color: #f1f5f9;
+    font-family: 'SF Mono', monospace;
+}
+.topology-tooltip .t-status {
+    color: #38bdf8;
+}
+.topology-tooltip small {
+    color: #94a3b8;
+}
+
 .nav-links {
     display: flex;
     gap: 4px;
