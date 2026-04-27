@@ -89,14 +89,14 @@
 
         el.innerHTML = `<div class="overview-bar">
             <div class="ov-item">
-                <span class="ov-label">CLUSTERS</span>
-                <span class="ov-value ${readyClusters === clusters.length ? "ok" : "warn"}">${readyClusters}/${clusters.length}</span>
-                <span class="ov-sub">healthy</span>
-            </div>
-            <div class="ov-item">
                 <span class="ov-label">NODES</span>
                 <span class="ov-value ${readyN === nodes.length ? "ok" : "warn"}">${readyN}/${nodes.length}</span>
                 <span class="ov-sub">ready</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">CLUSTERS</span>
+                <span class="ov-value ${readyClusters === clusters.length ? "ok" : "warn"}">${readyClusters}/${clusters.length}</span>
+                <span class="ov-sub">healthy</span>
             </div>
             <div class="ov-item">
                 <span class="ov-label">REDUNDANCY</span>
@@ -466,14 +466,14 @@
                 <span class="ov-sub">reporting</span>
             </div>
             <div class="ov-item">
-                <span class="ov-label">CLUSTERS</span>
-                <span class="ov-value ${readyClusters === totClusters ? "ok" : "warn"}">${readyClusters}/${totClusters}</span>
-                <span class="ov-sub">healthy</span>
-            </div>
-            <div class="ov-item">
                 <span class="ov-label">NODES</span>
                 <span class="ov-value ${readyNodes === totNodes ? "ok" : "warn"}">${readyNodes}/${totNodes}</span>
                 <span class="ov-sub">ready</span>
+            </div>
+            <div class="ov-item">
+                <span class="ov-label">CLUSTERS</span>
+                <span class="ov-value ${readyClusters === totClusters ? "ok" : "warn"}">${readyClusters}/${totClusters}</span>
+                <span class="ov-sub">healthy</span>
             </div>
             <div class="ov-item">
                 <span class="ov-label">REDUNDANCY</span>
@@ -590,8 +590,8 @@
 
             // Update overview bar
             card.querySelector(".dc-overview").innerHTML = `
-                <div class="ov-item"><span class="ov-label">CLUSTERS</span><span class="ov-value ${readyClusters === clusters.length ? "ok" : "warn"}">${readyClusters}/${clusters.length}</span></div>
                 <div class="ov-item"><span class="ov-label">NODES</span><span class="ov-value ${readyN === nodes.length ? "ok" : "warn"}">${readyN}/${nodes.length}</span></div>
+                <div class="ov-item"><span class="ov-label">CLUSTERS</span><span class="ov-value ${readyClusters === clusters.length ? "ok" : "warn"}">${readyClusters}/${clusters.length}</span></div>
                 <div class="ov-item"><span class="ov-label">REDUNDANCY</span><span class="ov-value ${dcRedundancy >= 2 ? "ok" : dcRedundancy >= 1 ? "warn" : "err"}">${dcRedundancy}</span><span class="ov-sub">node${dcRedundancy === 1 ? "" : "s"} can fail</span></div>
                 <div class="ov-item"><span class="ov-label">VMS</span><span class="ov-value ${runVMs === totVMs ? "ok" : "warn"}">${runVMs}/${totVMs}</span></div>
                 <div class="ov-item"><span class="ov-label">CPU</span><span class="ov-value ${pctCls(cpuPct)}">${cpuPct}%</span><span class="ov-sub">${useCPU} / ${totCPU} cores</span></div>
