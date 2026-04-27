@@ -1,8 +1,9 @@
 (function() {
     "use strict";
 
-    let comboChart = null;
-    const dcCharts = {}; // { dcName: Chart }
+    let cpuChart = null;
+    let memChart = null;
+    const dcCharts = {}; // { dcName: { cpu: Chart, mem: Chart } }
 
     // --- Initial load via REST ---
     fetch("/api/status")
@@ -359,38 +360,82 @@
     // --- Charts ---
     function renderCharts(nodes) {
         const labels = nodes.map(n => n.name);
+
+        // CPU data - use allocatable (scheduling limit)
+        const cpuAllocatable = nodes.map(n => n.cpuAllocatable || n.cpuCapacity);
         const cpuUsed = nodes.map(n => (n.vms || []).reduce((s, v) => s + v.cpuCores, 0));
-        const cpuFree = nodes.map(n => Math.max(0, (n.cpuAllocatable || n.cpuCapacity) - (n.vms || []).reduce((s, v) => s + v.cpuCores, 0)));
+        const cpuFree = cpuAllocatable.map((cap, i) => Math.max(0, cap - cpuUsed[i]));
+
+        // Memory data (in GB) - use allocatable (scheduling limit)
+        const memAllocatable = nodes.map(n => +((n.memAllocMB || n.memoryCapMB) / 1024).toFixed(1));
         const memUsed = nodes.map(n => +((n.vms || []).reduce((s, v) => s + v.memoryMB, 0) / 1024).toFixed(1));
-        const memFree = nodes.map(n => +Math.max(0, ((n.memAllocMB || n.memoryCapMB) / 1024) - (n.vms || []).reduce((s, v) => s + v.memoryMB, 0) / 1024).toFixed(1));
+        const memFree = memAllocatable.map((cap, i) => +Math.max(0, cap - memUsed[i]).toFixed(1));
 
-        const datasets = [
-            { label: "CPU Used", data: cpuUsed, backgroundColor: "#3b82f6", stack: "cpu" },
-            { label: "CPU Free", data: cpuFree, backgroundColor: "#1e3a5f", stack: "cpu" },
-            { label: "Mem Used (GB)", data: memUsed, backgroundColor: "#8b5cf6", stack: "mem" },
-            { label: "Mem Free (GB)", data: memFree, backgroundColor: "#3b1f6e", stack: "mem" }
-        ];
-
-        if (comboChart) {
-            comboChart.data.labels = labels;
-            datasets.forEach((ds, i) => { comboChart.data.datasets[i].data = ds.data; });
-            comboChart.update("none");
-        } else {
-            const ctx = document.getElementById("combo-chart");
-            if (ctx) {
-                comboChart = new Chart(ctx.getContext("2d"), {
-                    type: "bar",
-                    data: { labels, datasets },
-                    options: {
-                        responsive: true, maintainAspectRatio: false, animation: false,
-                        scales: {
-                            x: { stacked: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
-                            y: { stacked: true, beginAtZero: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }
-                        },
-                        plugins: { legend: { labels: { color: "#cbd5e1" } } }
-                    }
-                });
+        const cpuChartOpts = {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            scales: {
+                x: { stacked: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
+                y: { stacked: true, beginAtZero: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }
+            },
+            plugins: {
+                legend: { labels: { color: "#cbd5e1" } }
             }
+        };
+
+        // CPU chart - update in place if exists
+        if (cpuChart) {
+            cpuChart.data.labels = labels;
+            cpuChart.data.datasets[0].data = cpuUsed;
+            cpuChart.data.datasets[1].data = cpuFree;
+            cpuChart.update("none");
+        } else {
+            const cpuCtx = document.getElementById("cpu-chart").getContext("2d");
+            cpuChart = new Chart(cpuCtx, {
+                type: "bar",
+                data: {
+                    labels: labels,
+                    datasets: [
+                        { label: "VM vCPUs", data: cpuUsed, backgroundColor: "#3b82f6" },
+                        { label: "Available", data: cpuFree, backgroundColor: "#1e3a5f" }
+                    ]
+                },
+                options: cpuChartOpts
+            });
+        }
+
+        // Memory chart - update in place if exists
+        const memChartOpts = {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            scales: {
+                x: { stacked: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
+                y: { stacked: true, beginAtZero: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }
+            },
+            plugins: {
+                legend: { labels: { color: "#cbd5e1" } }
+            }
+        };
+        if (memChart) {
+            memChart.data.labels = labels;
+            memChart.data.datasets[0].data = memUsed;
+            memChart.data.datasets[1].data = memFree;
+            memChart.update("none");
+        } else {
+            const memCtx = document.getElementById("mem-chart").getContext("2d");
+            memChart = new Chart(memCtx, {
+                type: "bar",
+                data: {
+                    labels: labels,
+                    datasets: [
+                        { label: "VM Memory (GB)", data: memUsed, backgroundColor: "#8b5cf6" },
+                        { label: "Available (GB)", data: memFree, backgroundColor: "#3b1f6e" }
+                    ]
+                },
+                options: memChartOpts
+            });
         }
     }
 
@@ -541,7 +586,8 @@
         // Remove charts for DCs that no longer exist
         for (const key of Object.keys(dcCharts)) {
             if (!activeDCs.has(key)) {
-                dcCharts[key].destroy();
+                if (dcCharts[key].cpu) dcCharts[key].cpu.destroy();
+                if (dcCharts[key].mem) dcCharts[key].mem.destroy();
                 delete dcCharts[key];
             }
         }
@@ -582,9 +628,14 @@
                         <span class="dc-updated"></span>
                     </div>
                     <div class="overview-bar dc-overview"></div>
-                    <div class="dc-charts">
-                        <div class="chart-box chart-box-wide">
-                            <canvas id="${cardId}-combo"></canvas>
+                    <div class="charts-row dc-charts">
+                        <div class="chart-box">
+                            <h3>CPU Allocation per Node</h3>
+                            <canvas id="${cardId}-cpu"></canvas>
+                        </div>
+                        <div class="chart-box">
+                            <h3>Memory Allocation per Node (GB)</h3>
+                            <canvas id="${cardId}-mem"></canvas>
                         </div>
                     </div>
                 `;
@@ -623,36 +674,68 @@
 
     function renderDCCharts(dcName, cardId, nodes) {
         const labels = nodes.map(n => n.name);
+        const cpuAllocatable = nodes.map(n => n.cpuAllocatable || n.cpuCapacity);
         const cpuUsed = nodes.map(n => (n.vms || []).reduce((s, v) => s + v.cpuCores, 0));
-        const cpuFree = nodes.map(n => Math.max(0, (n.cpuAllocatable || n.cpuCapacity) - (n.vms || []).reduce((s, v) => s + v.cpuCores, 0)));
+        const cpuFree = cpuAllocatable.map((cap, i) => Math.max(0, cap - cpuUsed[i]));
+        const memAllocatable = nodes.map(n => +((n.memAllocMB || n.memoryCapMB) / 1024).toFixed(1));
         const memUsed = nodes.map(n => +((n.vms || []).reduce((s, v) => s + v.memoryMB, 0) / 1024).toFixed(1));
-        const memFree = nodes.map(n => +Math.max(0, ((n.memAllocMB || n.memoryCapMB) / 1024) - (n.vms || []).reduce((s, v) => s + v.memoryMB, 0) / 1024).toFixed(1));
+        const memFree = memAllocatable.map((cap, i) => +Math.max(0, cap - memUsed[i]).toFixed(1));
 
-        const datasets = [
-            { label: "CPU Used", data: cpuUsed, backgroundColor: "#3b82f6", stack: "cpu" },
-            { label: "CPU Free", data: cpuFree, backgroundColor: "#1e3a5f", stack: "cpu" },
-            { label: "Mem Used (GB)", data: memUsed, backgroundColor: "#8b5cf6", stack: "mem" },
-            { label: "Mem Free (GB)", data: memFree, backgroundColor: "#3b1f6e", stack: "mem" }
-        ];
+        const chartOpts = {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            scales: {
+                x: { stacked: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
+                y: { stacked: true, beginAtZero: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }
+            },
+            plugins: { legend: { labels: { color: "#cbd5e1" } } }
+        };
 
-        if (dcCharts[dcName]) {
-            dcCharts[dcName].data.labels = labels;
-            datasets.forEach((ds, i) => { dcCharts[dcName].data.datasets[i].data = ds.data; });
-            dcCharts[dcName].update("none");
+        if (!dcCharts[dcName]) dcCharts[dcName] = {};
+
+        // CPU chart
+        if (dcCharts[dcName].cpu) {
+            dcCharts[dcName].cpu.data.labels = labels;
+            dcCharts[dcName].cpu.data.datasets[0].data = cpuUsed;
+            dcCharts[dcName].cpu.data.datasets[1].data = cpuFree;
+            dcCharts[dcName].cpu.update("none");
         } else {
-            const canvas = document.getElementById(cardId + "-combo");
-            if (canvas) {
-                dcCharts[dcName] = new Chart(canvas.getContext("2d"), {
+            const cpuCanvas = document.getElementById(cardId + "-cpu");
+            if (cpuCanvas) {
+                dcCharts[dcName].cpu = new Chart(cpuCanvas.getContext("2d"), {
                     type: "bar",
-                    data: { labels, datasets },
-                    options: {
-                        responsive: true, maintainAspectRatio: false, animation: false,
-                        scales: {
-                            x: { stacked: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } },
-                            y: { stacked: true, beginAtZero: true, ticks: { color: "#94a3b8" }, grid: { color: "#1e293b" } }
-                        },
-                        plugins: { legend: { labels: { color: "#cbd5e1" } } }
-                    }
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            { label: "VM vCPUs", data: cpuUsed, backgroundColor: "#3b82f6" },
+                            { label: "Available", data: cpuFree, backgroundColor: "#1e3a5f" }
+                        ]
+                    },
+                    options: chartOpts
+                });
+            }
+        }
+
+        // Memory chart
+        if (dcCharts[dcName].mem) {
+            dcCharts[dcName].mem.data.labels = labels;
+            dcCharts[dcName].mem.data.datasets[0].data = memUsed;
+            dcCharts[dcName].mem.data.datasets[1].data = memFree;
+            dcCharts[dcName].mem.update("none");
+        } else {
+            const memCanvas = document.getElementById(cardId + "-mem");
+            if (memCanvas) {
+                dcCharts[dcName].mem = new Chart(memCanvas.getContext("2d"), {
+                    type: "bar",
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            { label: "VM Memory (GB)", data: memUsed, backgroundColor: "#8b5cf6" },
+                            { label: "Available (GB)", data: memFree, backgroundColor: "#3b1f6e" }
+                        ]
+                    },
+                    options: chartOpts
                 });
             }
         }

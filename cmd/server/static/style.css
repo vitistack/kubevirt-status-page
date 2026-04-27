@@ -265,13 +265,6 @@ h2 {
     height: 220px !important;
 }
 
-.chart-box-wide {
-    max-width: 100%;
-}
-.chart-box-wide canvas {
-    height: 280px !important;
-}
-
 /* Nodes */
 .nodes-grid {
     display: grid;
