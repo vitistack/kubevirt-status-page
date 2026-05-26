@@ -286,8 +286,10 @@ func fetchStatus(ctx context.Context, k8s kubernetes.Interface, dynClient dynami
 		if st, found, _ := unstructured.NestedString(vm.Object, "status", "printableStatus"); found {
 			vmStatusMap[key] = st
 		}
-		// Get memory from VM spec
+		// Get memory from VM spec: try memory.guest first, then resources.requests.memory
 		if memStr, found, _ := unstructured.NestedString(vm.Object, "spec", "template", "spec", "domain", "memory", "guest"); found {
+			vmMemMap[key] = parseMemoryToMB(memStr)
+		} else if memStr, found, _ := unstructured.NestedString(vm.Object, "spec", "template", "spec", "domain", "resources", "requests", "memory"); found {
 			vmMemMap[key] = parseMemoryToMB(memStr)
 		}
 	}
@@ -310,6 +312,14 @@ func fetchStatus(ctx context.Context, k8s kubernetes.Interface, dynClient dynami
 		}
 
 		memMB := vmMemMap[key]
+		// If no memory from VM object, try getting it from the VMI spec
+		if memMB == 0 {
+			if memStr, found, _ := unstructured.NestedString(vmi.Object, "spec", "domain", "memory", "guest"); found {
+				memMB = parseMemoryToMB(memStr)
+			} else if memStr, found, _ := unstructured.NestedString(vmi.Object, "spec", "domain", "resources", "requests", "memory"); found {
+				memMB = parseMemoryToMB(memStr)
+			}
+		}
 
 		// Determine cluster from VM name pattern or labels
 		labels := vmi.GetLabels()
