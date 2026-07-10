@@ -217,7 +217,16 @@
             const totalMem = cluster.vms.reduce((s, v) => s + v.memoryMB, 0);
             const running = cluster.vms.filter(v => v.status === "Running").length;
             const errors = cluster.vms.filter(v => v.status && (v.status.toLowerCase().includes("error") || v.status.toLowerCase().includes("unschedulable"))).length;
+            const nonMigratable = cluster.vms.filter(v => v.liveMigratable === false).length;
             const tr = document.createElement("tr");
+            let statusHtml;
+            if (errors > 0) {
+                statusHtml = '<span class="status-dot error"></span>' + errors + ' error';
+            } else if (nonMigratable > 0) {
+                statusHtml = '<span class="status-dot warning"></span>' + nonMigratable + ' non-migratable';
+            } else {
+                statusHtml = '<span class="status-dot ok"></span>OK';
+            }
             tr.innerHTML = `
                 <td class="cluster-name-cell">⎈ ${escapeHtml(cluster.name)}</td>
                 <td>${cluster.vms.length}</td>
@@ -225,7 +234,7 @@
                 <td>${totalCPU}</td>
                 <td>${(totalMem / 1024).toFixed(1)} GB</td>
                 <td>${cluster.nodes.length}</td>
-                <td>${errors > 0 ? '<span class="status-dot error"></span>' + errors + ' error' : '<span class="status-dot ok"></span>OK'}</td>
+                <td>${statusHtml}</td>
             `;
             tbody.appendChild(tr);
         });
@@ -242,11 +251,13 @@
             const totalCPU = cluster.vms.reduce((s, v) => s + v.cpuCores, 0);
             const totalMem = cluster.vms.reduce((s, v) => s + v.memoryMB, 0);
             const running = cluster.vms.filter(v => v.status === "Running").length;
+            const nonMigratable = cluster.vms.filter(v => v.liveMigratable === false).length;
 
             card.innerHTML = `
                 <h3>${escapeHtml(cluster.name)}</h3>
+                ${nonMigratable > 0 ? `<div class="cluster-warning"><span class="status-dot warning"></span>${nonMigratable} non-migratable VM${nonMigratable > 1 ? 's' : ''}</div>` : ''}
                 <div class="cluster-vm-list">
-                    ${cluster.vms.map(vm => `<span class="vm-pill ${statusClass(vm.status)}" title="${escapeHtml(vm.namespace)}/${escapeHtml(vm.name)}">${shortName(vm.name)}<br><small>${vm.status}</small></span>`).join("")}
+                    ${cluster.vms.map(vm => `<span class="vm-pill ${statusClass(vm.status)}${vm.liveMigratable === false ? ' non-migratable' : ''}" title="${escapeHtml(vm.namespace)}/${escapeHtml(vm.name)}${vm.liveMigratable === false ? ' (non-migratable)' : ''}">${shortName(vm.name)}<br><small>${vm.status}</small></span>`).join("")}
                 </div>
                 <div class="cluster-stats">
                     ${running}/${cluster.vms.length} running &middot;

@@ -34,13 +34,14 @@ var staticFiles embed.FS
 // --- Data types sent to frontend ---
 
 type VMInfo struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Status    string `json:"status"`
-	NodeName  string `json:"nodeName"`
-	CPUCores  int64  `json:"cpuCores"`
-	MemoryMB  int64  `json:"memoryMB"`
-	Cluster   string `json:"cluster"`
+	Name           string `json:"name"`
+	Namespace      string `json:"namespace"`
+	Status         string `json:"status"`
+	NodeName       string `json:"nodeName"`
+	CPUCores       int64  `json:"cpuCores"`
+	MemoryMB       int64  `json:"memoryMB"`
+	Cluster        string `json:"cluster"`
+	LiveMigratable bool   `json:"liveMigratable"`
 }
 
 type NodeInfo struct {
@@ -321,18 +322,34 @@ func fetchStatus(ctx context.Context, k8s kubernetes.Interface, dynClient dynami
 			}
 		}
 
+		// Check LiveMigratable condition
+		liveMigratable := true
+		if conditions, found, _ := unstructured.NestedSlice(vmi.Object, "status", "conditions"); found {
+			for _, c := range conditions {
+				cond, ok := c.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if cond["type"] == "LiveMigratable" && cond["status"] == "False" {
+					liveMigratable = false
+					break
+				}
+			}
+		}
+
 		// Determine cluster from VM name pattern or labels
 		labels := vmi.GetLabels()
 		clusterName := inferClusterName(name, labels)
 
 		vmInfo := VMInfo{
-			Name:      name,
-			Namespace: ns,
-			Status:    status,
-			NodeName:  nodeName,
-			CPUCores:  cpuCores,
-			MemoryMB:  memMB,
-			Cluster:   clusterName,
+			Name:           name,
+			Namespace:      ns,
+			Status:         status,
+			NodeName:       nodeName,
+			CPUCores:       cpuCores,
+			MemoryMB:       memMB,
+			Cluster:        clusterName,
+			LiveMigratable: liveMigratable,
 		}
 
 		// Assign to node

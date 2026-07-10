@@ -8,26 +8,21 @@ This project is a status page application that provides a graphical view of Kube
 kubevirt-status-page
 ├── cmd
 │   └── server
-│       └── main.go          # Entry point of the Go application
-├── internal
-│   ├── kubevirt
-│   │   ├── client.go        # KubeVirt client implementation
-│   │   └── types.go         # Data structures for KubeVirt nodes and VMs
-│   ├── cluster
-│   │   └── aggregator.go     # Logic to aggregate data from KubeVirt nodes
-│   └── sse
-│       └── handler.go       # Server-Sent Events (SSE) handler
-├── web
-│   ├── static
-│   │   ├── index.html       # Main HTML file for the frontend
-│   │   ├── style.css        # Styles for the frontend
-│   │   └── app.js           # JavaScript code for frontend logic
-│   └── embed.go             # Embedding static files into the Go binary
-├── Dockerfile                # Instructions for building the Docker image
-├── go.mod                   # Go module definition file
-├── go.sum                   # Checksums for module dependencies
-├── Makefile                 # Build and deployment commands
-└── README.md                # Project documentation
+│       ├── main.go              # Entry point — HTTP server, SSE broker, k8s data fetching
+│       └── static
+│           ├── index.html       # Main dashboard (node & cluster view)
+│           ├── style.css        # Dashboard styles
+│           ├── app.js           # Dashboard frontend logic
+│           ├── topology.html    # Network topology view
+│           ├── topology.css     # Topology styles
+│           └── topology.js      # Topology frontend logic
+├── charts
+│   └── kubevirt-status-page     # Helm chart for Kubernetes deployment
+├── Dockerfile                   # Container image build
+├── go.mod                       # Go module definition
+├── go.sum                       # Module dependency checksums
+├── Makefile                     # Build and deployment commands
+└── README.md                    # Project documentation
 ```
 
 ## Setup Instructions
