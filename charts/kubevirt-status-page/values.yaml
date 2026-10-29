@@ -9,6 +9,9 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Log level: debug, info, warn or error
+logLevel: info
+
 # Kubernetes context to use (leave empty to use in-cluster config)
 kubeContext: ""
 

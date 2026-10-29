@@ -1,29 +1,20 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/subtle"
 	"embed"
-	"encoding/json"
-	"fmt"
-	"io"
+	"errors"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"sort"
+	"runtime/debug"
+	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -80,128 +71,47 @@ type DCStatus struct {
 	Stale bool `json:"stale"`
 }
 
-// dcStore holds the latest report from each agent.
-type dcStore struct {
-	mu    sync.RWMutex
-	dcs   map[string]*dcEntry
-	stale time.Duration
-}
-
-type dcEntry struct {
-	data     StatusData
-	received time.Time
-}
-
-func newDCStore(staleDuration time.Duration) *dcStore {
-	return &dcStore{dcs: make(map[string]*dcEntry), stale: staleDuration}
-}
-
-func (s *dcStore) update(d StatusData) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.dcs[d.Datacenter] = &dcEntry{data: d, received: time.Now()}
-	log.Printf("[HUB] Updated datacenter=%q, nodes=%d, clusters=%d, vms=%d", 
-		d.Datacenter, len(d.Nodes), len(d.Clusters), countVMs(d.Clusters))
-}
-
-func (s *dcStore) snapshot() HubData {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	var out []DCStatus
-	now := time.Now()
-	for _, e := range s.dcs {
-		ds := DCStatus{StatusData: e.data, Stale: now.Sub(e.received) > s.stale}
-		out = append(out, ds)
+func setupLogging() {
+	level := slog.LevelInfo
+	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn", "warning":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Datacenter < out[j].Datacenter })
-	return HubData{Datacenters: out, Updated: time.Now().Format(time.RFC3339)}
-}
-
-// --- SSE ---
-
-type sseClient struct {
-	ch chan []byte
-}
-
-type SSEBroker struct {
-	mu      sync.RWMutex
-	clients map[*sseClient]bool
-}
-
-func NewSSEBroker() *SSEBroker {
-	return &SSEBroker{clients: make(map[*sseClient]bool)}
-}
-
-func (b *SSEBroker) Subscribe() *sseClient {
-	c := &sseClient{ch: make(chan []byte, 8)}
-	b.mu.Lock()
-	b.clients[c] = true
-	clientCount := len(b.clients)
-	b.mu.Unlock()
-	log.Printf("[SSE] Client subscribed, total clients: %d", clientCount)
-	return c
-}
-
-func (b *SSEBroker) Unsubscribe(c *sseClient) {
-	b.mu.Lock()
-	delete(b.clients, c)
-	close(c.ch)
-	clientCount := len(b.clients)
-	b.mu.Unlock()
-	log.Printf("[SSE] Client unsubscribed, total clients: %d", clientCount)
-}
-
-func (b *SSEBroker) Broadcast(data []byte) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for c := range b.clients {
-		select {
-		case c.ch <- data:
-		default:
-			// drop if client is slow
-		}
+	opts := &slog.HandlerOptions{Level: level}
+	var h slog.Handler = slog.NewTextHandler(os.Stderr, opts)
+	if strings.EqualFold(os.Getenv("LOG_FORMAT"), "json") {
+		h = slog.NewJSONHandler(os.Stderr, opts)
 	}
+	slog.SetDefault(slog.New(h))
 }
 
-func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		log.Printf("[SSE] HTTP/2 push not supported")
-		http.Error(w, "SSE not supported", http.StatusInternalServerError)
+// setMemoryLimitFromCgroup makes the GC work harder before the container limit
+// is reached, instead of letting the heap grow to 2x live data. GOMEMLIMIT wins if set.
+func setMemoryLimitFromCgroup() {
+	if os.Getenv("GOMEMLIMIT") != "" {
 		return
 	}
-	log.Printf("[SSE] New connection from %s", r.RemoteAddr)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	client := b.Subscribe()
-	defer b.Unsubscribe(client)
-
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("[SSE] Connection closed from %s", r.RemoteAddr)
-			return
-		case msg, ok := <-client.ch:
-			if !ok {
-				return
-			}
-			fmt.Fprintf(w, "data: %s\n\n", msg)
-			flusher.Flush()
-		}
+	b, err := os.ReadFile("/sys/fs/cgroup/memory.max")
+	if err != nil {
+		return
 	}
+	limit, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil || limit <= 0 {
+		return // "max" or unparsable
+	}
+	soft := limit * 9 / 10
+	debug.SetMemoryLimit(soft)
+	slog.Info("memory limit set from cgroup", "cgroupLimitMiB", limit>>20, "goMemLimitMiB", soft>>20)
 }
-
-// --- Kubernetes data fetcher ---
 
 func buildConfig() (*rest.Config, error) {
 	// If KUBECONFIG is explicitly set, use it (skip in-cluster config)
 	kubeconfig := os.Getenv("KUBECONFIG")
 	if kubeconfig == "" {
-		// Try in-cluster first
 		if cfg, err := rest.InClusterConfig(); err == nil {
 			return cfg, nil
 		}
@@ -216,216 +126,12 @@ func buildConfig() (*rest.Config, error) {
 	).ClientConfig()
 }
 
-func fetchStatus(ctx context.Context, k8s kubernetes.Interface, dynClient dynamic.Interface) (*StatusData, error) {
-	// 1. Get nodes
-	log.Printf("[FETCH] Starting data collection...")
-	nodeList, err := k8s.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("list nodes: %w", err)
-	}
-	log.Printf("[FETCH] Found %d nodes", len(nodeList.Items))
-
-	nodeMap := make(map[string]int) // name -> index in nodes
-	var nodes []NodeInfo
-	for _, n := range nodeList.Items {
-		ni := NodeInfo{
-			Name:   n.Name,
-			Status: "NotReady",
-		}
-		for _, cond := range n.Status.Conditions {
-			if cond.Type == "Ready" && cond.Status == "True" {
-				ni.Status = "Ready"
-			}
-		}
-		// roles
-		isControlPlane := false
-		for lbl := range n.Labels {
-			if lbl == "node-role.kubernetes.io/control-plane" {
-				ni.Roles = append(ni.Roles, "control-plane")
-				isControlPlane = true
-			} else if lbl == "node-role.kubernetes.io/worker" {
-				ni.Roles = append(ni.Roles, "worker")
-			}
-		}
-		if len(ni.Roles) == 0 {
-			ni.Roles = []string{"worker"}
-		}
-		// Skip control-plane nodes as they cannot schedule VMs
-		if isControlPlane {
-			continue
-		}
-		// capacity
-		if cpu, ok := n.Status.Capacity["cpu"]; ok {
-			ni.CPUCapacity = cpu.Value()
-		}
-		if mem, ok := n.Status.Capacity["memory"]; ok {
-			ni.MemoryCapMB = mem.Value() / (1024 * 1024)
-		}
-		// CPU is overcommittable (3x), memory is not
-		ni.CPUAllocatable = ni.CPUCapacity * 3
-		if mem, ok := n.Status.Allocatable["memory"]; ok {
-			ni.MemAllocMB = mem.Value() / (1024 * 1024)
-		}
-		nodes = append(nodes, ni)
-		nodeMap[n.Name] = len(nodes) - 1
-	}
-
-	// 2. Get VMIs (VirtualMachineInstances)
-	vmiGVR := schema.GroupVersionResource{
-		Group:    "kubevirt.io",
-		Version:  "v1",
-		Resource: "virtualmachineinstances",
-	}
-	vmiList, err := dynClient.Resource(vmiGVR).Namespace("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("list VMIs: %w", err)
-	}
-	log.Printf("[FETCH] Found %d VMIs", len(vmiList.Items))
-
-	// 3. Get VMs for status info
-	vmGVR := schema.GroupVersionResource{
-		Group:    "kubevirt.io",
-		Version:  "v1",
-		Resource: "virtualmachines",
-	}
-	vmList, err := dynClient.Resource(vmGVR).Namespace("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("list VMs: %w", err)
-	}
-	log.Printf("[FETCH] Found %d VMs", len(vmList.Items))
-	vmStatusMap := make(map[string]string) // ns/name -> printableStatus
-	vmMemMap := make(map[string]int64)     // ns/name -> memoryMB
-	for _, vm := range vmList.Items {
-		key := vm.GetNamespace() + "/" + vm.GetName()
-		if st, found, _ := unstructured.NestedString(vm.Object, "status", "printableStatus"); found {
-			vmStatusMap[key] = st
-		}
-		// Get memory from VM spec: try memory.guest first, then resources.requests.memory
-		if memStr, found, _ := unstructured.NestedString(vm.Object, "spec", "template", "spec", "domain", "memory", "guest"); found {
-			vmMemMap[key] = parseMemoryToMB(memStr)
-		} else if memStr, found, _ := unstructured.NestedString(vm.Object, "spec", "template", "spec", "domain", "resources", "requests", "memory"); found {
-			vmMemMap[key] = parseMemoryToMB(memStr)
-		}
-	}
-
-	clusterMap := make(map[string]*ClusterGroup)
-
-	for _, vmi := range vmiList.Items {
-		name := vmi.GetName()
-		ns := vmi.GetNamespace()
-		key := ns + "/" + name
-
-		nodeName, _, _ := unstructured.NestedString(vmi.Object, "status", "nodeName")
-		phase, _, _ := unstructured.NestedString(vmi.Object, "status", "phase")
-		cpuCores, _, _ := unstructured.NestedInt64(vmi.Object, "spec", "domain", "cpu", "cores")
-
-		// Get status from VM if available, otherwise use VMI phase
-		status := phase
-		if vmSt, ok := vmStatusMap[key]; ok {
-			status = vmSt
-		}
-
-		memMB := vmMemMap[key]
-		// If no memory from VM object, try getting it from the VMI spec
-		if memMB == 0 {
-			if memStr, found, _ := unstructured.NestedString(vmi.Object, "spec", "domain", "memory", "guest"); found {
-				memMB = parseMemoryToMB(memStr)
-			} else if memStr, found, _ := unstructured.NestedString(vmi.Object, "spec", "domain", "resources", "requests", "memory"); found {
-				memMB = parseMemoryToMB(memStr)
-			}
-		}
-
-		// Check LiveMigratable condition
-		liveMigratable := true
-		if conditions, found, _ := unstructured.NestedSlice(vmi.Object, "status", "conditions"); found {
-			for _, c := range conditions {
-				cond, ok := c.(map[string]interface{})
-				if !ok {
-					continue
-				}
-				if cond["type"] == "LiveMigratable" && cond["status"] == "False" {
-					liveMigratable = false
-					break
-				}
-			}
-		}
-
-		// Determine cluster from VM name pattern or labels
-		labels := vmi.GetLabels()
-		clusterName := inferClusterName(name, labels)
-
-		vmInfo := VMInfo{
-			Name:           name,
-			Namespace:      ns,
-			Status:         status,
-			NodeName:       nodeName,
-			CPUCores:       cpuCores,
-			MemoryMB:       memMB,
-			Cluster:        clusterName,
-			LiveMigratable: liveMigratable,
-		}
-
-		// Assign to node
-		if idx, ok := nodeMap[nodeName]; ok {
-			nodes[idx].VMs = append(nodes[idx].VMs, vmInfo)
-		}
-
-		// Group by cluster
-		cg, ok := clusterMap[clusterName]
-		if !ok {
-			cg = &ClusterGroup{Name: clusterName}
-			clusterMap[clusterName] = cg
-		}
-		cg.VMs = append(cg.VMs, vmInfo)
-		// track nodes in cluster
-		if nodeName != "" {
-			found := false
-			for _, n := range cg.Nodes {
-				if n == nodeName {
-					found = true
-					break
-				}
-			}
-			if !found {
-				cg.Nodes = append(cg.Nodes, nodeName)
-			}
-		}
-	}
-
-	var clusters []ClusterGroup
-	for _, cg := range clusterMap {
-		sort.Slice(cg.VMs, func(i, j int) bool { return cg.VMs[i].Name < cg.VMs[j].Name })
-		sort.Strings(cg.Nodes)
-		clusters = append(clusters, *cg)
-	}
-	sort.Slice(clusters, func(i, j int) bool { return clusters[i].Name < clusters[j].Name })
-
-	// Sort VMs within each node
-	for i := range nodes {
-		sort.Slice(nodes[i].VMs, func(a, b int) bool { return nodes[i].VMs[a].Name < nodes[i].VMs[b].Name })
-	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
-
-	log.Printf("[FETCH] Complete: %d worker nodes, %d clusters", len(nodes), len(clusters))
-	for _, c := range clusters {
-		log.Printf("[FETCH]   Cluster %q: %d vms, %d nodes", c.Name, len(c.VMs), len(c.Nodes))
-	}
-
-	return &StatusData{
-		Nodes:    nodes,
-		Clusters: clusters,
-		Updated:  time.Now().Format(time.RFC3339),
-	}, nil
-}
-
 func inferClusterName(vmName string, labels map[string]string) string {
-	parts := splitVMName(vmName)
-	if parts != "" {
-		return parts
+	if p := splitVMName(vmName); p != "" {
+		return p
 	}
 	if src, ok := labels["vitistack.io/source-machine"]; ok {
-		p := splitVMName(src)
-		if p != "" {
+		if p := splitVMName(src); p != "" {
 			return p
 		}
 	}
@@ -433,14 +139,8 @@ func inferClusterName(vmName string, labels map[string]string) string {
 }
 
 func splitVMName(name string) string {
-	// Find the last segment that looks like a role (ctp\d+, wrk\d+)
-	lastDash := -1
-	for i := len(name) - 1; i >= 0; i-- {
-		if name[i] == '-' {
-			lastDash = i
-			break
-		}
-	}
+	// Strip a trailing role segment (ctp\d+, wrk\d+)
+	lastDash := strings.LastIndexByte(name, '-')
 	if lastDash > 0 {
 		suffix := name[lastDash+1:]
 		if len(suffix) >= 4 && (suffix[:3] == "ctp" || suffix[:3] == "wrk") {
@@ -463,8 +163,7 @@ func parseMemoryToMB(s string) int64 {
 			break
 		}
 	}
-	suffix := s[i:]
-	switch suffix {
+	switch s[i:] {
 	case "Gi":
 		return num * 1024
 	case "Mi":
@@ -491,7 +190,8 @@ func countVMs(clusters []ClusterGroup) int {
 }
 
 func main() {
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	setupLogging()
+	setMemoryLimitFromCgroup()
 
 	hubMode := strings.EqualFold(os.Getenv("HUB_MODE"), "true")
 	hubToken := os.Getenv("HUB_TOKEN")
@@ -504,175 +204,18 @@ func main() {
 	defer cancel()
 
 	if hubMode {
-		log.Println("========== STARTING IN HUB MODE ==========")
-		if hubToken != "" {
-			log.Println("[HUB] Bearer token authentication enabled")
-		} else {
-			log.Println("[HUB] WARNING: No bearer token set, accepting unauthenticated reports!")
-		}
-		// ---- Hub mode: receive reports from agents, serve combined view ----
-		store := newDCStore(30 * time.Second)
-
-		mux.HandleFunc("/api/report", func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPost {
-				http.Error(w, "POST only", http.StatusMethodNotAllowed)
-				return
-			}
-			if hubToken != "" {
-				auth := r.Header.Get("Authorization")
-				if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(auth[7:]), []byte(hubToken)) != 1 {
-					log.Printf("[HUB] Unauthorized report from %s", r.RemoteAddr)
-					http.Error(w, "unauthorized", http.StatusUnauthorized)
-					return
-				}
-			}
-			body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // 10 MB max
-			if err != nil {
-				log.Printf("[HUB] Failed to read body from %s: %v", r.RemoteAddr, err)
-				http.Error(w, "read error", http.StatusBadRequest)
-				return
-			}
-			var sd StatusData
-			if err := json.Unmarshal(body, &sd); err != nil {
-				log.Printf("[HUB] Failed to unmarshal JSON from %s: %v, body size=%d", r.RemoteAddr, err, len(body))
-				http.Error(w, "bad json", http.StatusBadRequest)
-				return
-			}
-			if sd.Datacenter == "" {
-				log.Printf("[HUB] Missing datacenter field from %s", r.RemoteAddr)
-				http.Error(w, "datacenter field required", http.StatusBadRequest)
-				return
-			}
-			log.Printf("[HUB] Received report from %s, datacenter=%q", r.RemoteAddr, sd.Datacenter)
-			store.update(sd)
-			w.WriteHeader(http.StatusNoContent)
-		})
-
-		mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			snap := store.snapshot()
-			log.Printf("[HUB] Status request: serving %d datacenters", len(snap.Datacenters))
-			for _, dc := range snap.Datacenters {
-				log.Printf("[HUB]   - %s (stale=%v, nodes=%d, clusters=%d)", dc.Datacenter, dc.Stale, len(dc.Nodes), len(dc.Clusters))
-			}
-			json.NewEncoder(w).Encode(snap)
-		})
-
-		// Broadcast combined snapshot every 5 seconds
-		go func() {
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					snap := store.snapshot()
-					log.Printf("[HUB] Broadcast tick: %d datacenters, %d total clients", len(snap.Datacenters), len(broker.clients))
-					jsonData, _ := json.Marshal(snap)
-					broker.Broadcast(jsonData)
-				}
-			}
-		}()
-
-		log.Println("[HUB] Ready to receive agent reports on /api/report")
+		runHub(ctx, mux, broker, hubToken)
 	} else {
-		log.Println("========== STARTING IN AGENT MODE ==========")
-		// ---- Agent mode: query local k8s, serve local dashboard ----
-		cfg, err := buildConfig()
-		if err != nil {
-			log.Fatalf("Failed to build kubeconfig: %v", err)
-		}
-
-		k8s, err := kubernetes.NewForConfig(cfg)
-		if err != nil {
-			log.Fatalf("Failed to create k8s client: %v", err)
-		}
-
-		dynClient, err := dynamic.NewForConfig(cfg)
-		if err != nil {
-			log.Fatalf("Failed to create dynamic client: %v", err)
-		}
-
-		dcName := os.Getenv("DATACENTER_NAME")
-		hubURL := os.Getenv("HUB_URL") // e.g. https://hub.example.com
-		
-		log.Printf("[AGENT] Datacenter name: %s", dcName)
-		if hubURL != "" {
-			log.Printf("[AGENT] Hub URL: %s", hubURL)
-			if hubToken != "" {
-				log.Printf("[AGENT] Using bearer token for hub authentication")
-			}
-		} else {
-			log.Println("[AGENT] No hub URL configured, running standalone")
-		}
-
-		interval := 5 * time.Second
-
-		// Background poller
-		go func() {
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-
-			httpClient := &http.Client{Timeout: 10 * time.Second}
-
-			doFetch := func() {
-				data, err := fetchStatus(ctx, k8s, dynClient)
-				if err != nil {
-					log.Printf("[AGENT] Error fetching status: %v", err)
-					return
-				}
-				data.Datacenter = dcName
-				log.Printf("[AGENT] Fetched status: nodes=%d, clusters=%d, vms=%d", 
-					len(data.Nodes), len(data.Clusters), countVMs(data.Clusters))
-
-				jsonData, err := json.Marshal(data)
-				if err != nil {
-					log.Printf("[AGENT] Error marshaling data: %v", err)
-					return
-				}
-				broker.Broadcast(jsonData)
-				log.Printf("[AGENT] Broadcast to %d local clients", len(broker.clients))
-
-				// Push to hub if configured
-				if hubURL != "" {
-					go pushToHub(httpClient, hubURL, hubToken, jsonData, dcName)
-				}
-			}
-
-			doFetch()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					doFetch()
-				}
-			}
-		}()
-
-		mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-			data, err := fetchStatus(r.Context(), k8s, dynClient)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			data.Datacenter = dcName
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(data)
-		})
-
-		if dcName != "" {
-			log.Printf("[AGENT] Ready, polling every 5s and serving /api/status")
-		} else {
-			log.Printf("[AGENT] WARNING: DATACENTER_NAME not set!")
+		if err := runAgent(ctx, mux, broker, hubToken); err != nil {
+			slog.Error("agent startup failed", "err", err)
+			os.Exit(1)
 		}
 	}
 
-	// Serve embedded static files
 	staticFS, err := fs.Sub(staticFiles, "static")
 	if err != nil {
-		log.Fatalf("Failed to create sub FS: %v", err)
+		slog.Error("failed to create static FS", "err", err)
+		os.Exit(1)
 	}
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
 
@@ -687,47 +230,20 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("Shutting down...")
+		slog.Info("shutting down")
 		cancel()
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
-		srv.Shutdown(shutdownCtx)
+		_ = srv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("Listening on %s", addr)
-	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-		log.Fatalf("Server error: %v", err)
+	slog.Info("listening", "addr", addr)
+	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("server error", "err", err)
+		os.Exit(1)
 	}
-}
-
-func pushToHub(client *http.Client, hubURL, token string, data []byte, dcName string) {
-	url := strings.TrimRight(hubURL, "/") + "/api/report"
-	log.Printf("[PUSH] Sending report to %s for datacenter=%q (size=%d bytes)", url, dcName, len(data))
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
-	if err != nil {
-		log.Printf("[PUSH] Request error: %v", err)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-		log.Printf("[PUSH] Using bearer token")
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Printf("[PUSH] HTTP error: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		log.Printf("[PUSH] HTTP %d: %s", resp.StatusCode, string(respBody))
-		return
-	}
-	log.Printf("[PUSH] Success: HTTP %d", resp.StatusCode)
 }

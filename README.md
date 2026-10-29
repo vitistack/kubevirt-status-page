@@ -158,6 +158,20 @@ Each agent's local dashboard remains fully functional even if the hub is unreach
 | `HUB_TOKEN` | Both | Shared secret for `Authorization: Bearer` authentication |
 | `DATACENTER_NAME` | Agent | Name of this datacenter (e.g. `dc-west-1`) |
 | `HUB_URL` | Agent | URL of the central hub (e.g. `https://hub.example.com`) |
+| `LOG_LEVEL` | Both | `debug`, `info` (default), `warn` or `error` |
+| `LOG_FORMAT` | Both | Set to `json` for JSON logs (default: text) |
+| `GOMEMLIMIT` | Both | Go soft memory limit. Defaults to 90% of the container memory limit |
+
+### Debugging
+
+At `info` level the logs only show state changes, so a healthy instance is quiet:
+
+- **Agent**: startup config (datacenter, hub URL, whether auth is set), `initial sync complete` with object counts, `first successful push to hub`, `hub push failed` (first failure, then every 12th), `hub push recovered` (with downtime), list/watch errors, and an `agent summary` every 5 minutes (object counts, push ok/failed, memory).
+- **Hub**: `datacenter reported for the first time`, `datacenter went stale` (no report for 30s), `datacenter recovered`, and `report rejected` with the reason (unauthorized, bad JSON, missing datacenter, too large).
+
+If a datacenter is missing from the hub, check its agent logs for `hub push failed` and the hub logs for `report rejected`. The hub keeps state in memory, so after a hub restart a datacenter only shows up once its agent pushes again (within 10s if the agent is healthy).
+
+Set `LOG_LEVEL=debug` to log every push, report and snapshot build.
 
 ### Deploying the Hub
 
