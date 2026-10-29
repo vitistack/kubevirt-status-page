@@ -100,6 +100,8 @@ func (s *dcStore) update(d StatusData) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dcs[d.Datacenter] = &dcEntry{data: d, received: time.Now()}
+	log.Printf("[HUB] Updated datacenter=%q, nodes=%d, clusters=%d, vms=%d", 
+		d.Datacenter, len(d.Nodes), len(d.Clusters), countVMs(d.Clusters))
 }
 
 func (s *dcStore) snapshot() HubData {
@@ -134,7 +136,9 @@ func (b *SSEBroker) Subscribe() *sseClient {
 	c := &sseClient{ch: make(chan []byte, 8)}
 	b.mu.Lock()
 	b.clients[c] = true
+	clientCount := len(b.clients)
 	b.mu.Unlock()
+	log.Printf("[SSE] Client subscribed, total clients: %d", clientCount)
 	return c
 }
 
@@ -142,7 +146,9 @@ func (b *SSEBroker) Unsubscribe(c *sseClient) {
 	b.mu.Lock()
 	delete(b.clients, c)
 	close(c.ch)
+	clientCount := len(b.clients)
 	b.mu.Unlock()
+	log.Printf("[SSE] Client unsubscribed, total clients: %d", clientCount)
 }
 
 func (b *SSEBroker) Broadcast(data []byte) {
@@ -160,9 +166,11 @@ func (b *SSEBroker) Broadcast(data []byte) {
 func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		log.Printf("[SSE] HTTP/2 push not supported")
 		http.Error(w, "SSE not supported", http.StatusInternalServerError)
 		return
 	}
+	log.Printf("[SSE] New connection from %s", r.RemoteAddr)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -175,6 +183,7 @@ func (b *SSEBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("[SSE] Connection closed from %s", r.RemoteAddr)
 			return
 		case msg, ok := <-client.ch:
 			if !ok {
@@ -209,10 +218,12 @@ func buildConfig() (*rest.Config, error) {
 
 func fetchStatus(ctx context.Context, k8s kubernetes.Interface, dynClient dynamic.Interface) (*StatusData, error) {
 	// 1. Get nodes
+	log.Printf("[FETCH] Starting data collection...")
 	nodeList, err := k8s.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
+	log.Printf("[FETCH] Found %d nodes", len(nodeList.Items))
 
 	nodeMap := make(map[string]int) // name -> index in nodes
 	var nodes []NodeInfo
@@ -269,6 +280,7 @@ func fetchStatus(ctx context.Context, k8s kubernetes.Interface, dynClient dynami
 	if err != nil {
 		return nil, fmt.Errorf("list VMIs: %w", err)
 	}
+	log.Printf("[FETCH] Found %d VMIs", len(vmiList.Items))
 
 	// 3. Get VMs for status info
 	vmGVR := schema.GroupVersionResource{
@@ -280,6 +292,7 @@ func fetchStatus(ctx context.Context, k8s kubernetes.Interface, dynClient dynami
 	if err != nil {
 		return nil, fmt.Errorf("list VMs: %w", err)
 	}
+	log.Printf("[FETCH] Found %d VMs", len(vmList.Items))
 	vmStatusMap := make(map[string]string) // ns/name -> printableStatus
 	vmMemMap := make(map[string]int64)     // ns/name -> memoryMB
 	for _, vm := range vmList.Items {
@@ -393,6 +406,11 @@ func fetchStatus(ctx context.Context, k8s kubernetes.Interface, dynClient dynami
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Name < nodes[j].Name })
 
+	log.Printf("[FETCH] Complete: %d worker nodes, %d clusters", len(nodes), len(clusters))
+	for _, c := range clusters {
+		log.Printf("[FETCH]   Cluster %q: %d vms, %d nodes", c.Name, len(c.VMs), len(c.Nodes))
+	}
+
 	return &StatusData{
 		Nodes:    nodes,
 		Clusters: clusters,
@@ -464,8 +482,16 @@ func parseMemoryToMB(s string) int64 {
 	}
 }
 
+func countVMs(clusters []ClusterGroup) int {
+	count := 0
+	for _, c := range clusters {
+		count += len(c.VMs)
+	}
+	return count
+}
+
 func main() {
-	log.SetFlags(log.Ltime | log.Lshortfile)
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
 	hubMode := strings.EqualFold(os.Getenv("HUB_MODE"), "true")
 	hubToken := os.Getenv("HUB_TOKEN")
@@ -478,6 +504,12 @@ func main() {
 	defer cancel()
 
 	if hubMode {
+		log.Println("========== STARTING IN HUB MODE ==========")
+		if hubToken != "" {
+			log.Println("[HUB] Bearer token authentication enabled")
+		} else {
+			log.Println("[HUB] WARNING: No bearer token set, accepting unauthenticated reports!")
+		}
 		// ---- Hub mode: receive reports from agents, serve combined view ----
 		store := newDCStore(30 * time.Second)
 
@@ -489,31 +521,41 @@ func main() {
 			if hubToken != "" {
 				auth := r.Header.Get("Authorization")
 				if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(auth[7:]), []byte(hubToken)) != 1 {
+					log.Printf("[HUB] Unauthorized report from %s", r.RemoteAddr)
 					http.Error(w, "unauthorized", http.StatusUnauthorized)
 					return
 				}
 			}
 			body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20)) // 10 MB max
 			if err != nil {
+				log.Printf("[HUB] Failed to read body from %s: %v", r.RemoteAddr, err)
 				http.Error(w, "read error", http.StatusBadRequest)
 				return
 			}
 			var sd StatusData
 			if err := json.Unmarshal(body, &sd); err != nil {
+				log.Printf("[HUB] Failed to unmarshal JSON from %s: %v, body size=%d", r.RemoteAddr, err, len(body))
 				http.Error(w, "bad json", http.StatusBadRequest)
 				return
 			}
 			if sd.Datacenter == "" {
+				log.Printf("[HUB] Missing datacenter field from %s", r.RemoteAddr)
 				http.Error(w, "datacenter field required", http.StatusBadRequest)
 				return
 			}
+			log.Printf("[HUB] Received report from %s, datacenter=%q", r.RemoteAddr, sd.Datacenter)
 			store.update(sd)
 			w.WriteHeader(http.StatusNoContent)
 		})
 
 		mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(store.snapshot())
+			snap := store.snapshot()
+			log.Printf("[HUB] Status request: serving %d datacenters", len(snap.Datacenters))
+			for _, dc := range snap.Datacenters {
+				log.Printf("[HUB]   - %s (stale=%v, nodes=%d, clusters=%d)", dc.Datacenter, dc.Stale, len(dc.Nodes), len(dc.Clusters))
+			}
+			json.NewEncoder(w).Encode(snap)
 		})
 
 		// Broadcast combined snapshot every 5 seconds
@@ -526,14 +568,16 @@ func main() {
 					return
 				case <-ticker.C:
 					snap := store.snapshot()
+					log.Printf("[HUB] Broadcast tick: %d datacenters, %d total clients", len(snap.Datacenters), len(broker.clients))
 					jsonData, _ := json.Marshal(snap)
 					broker.Broadcast(jsonData)
 				}
 			}
 		}()
 
-		log.Println("Running in HUB mode")
+		log.Println("[HUB] Ready to receive agent reports on /api/report")
 	} else {
+		log.Println("========== STARTING IN AGENT MODE ==========")
 		// ---- Agent mode: query local k8s, serve local dashboard ----
 		cfg, err := buildConfig()
 		if err != nil {
@@ -552,6 +596,16 @@ func main() {
 
 		dcName := os.Getenv("DATACENTER_NAME")
 		hubURL := os.Getenv("HUB_URL") // e.g. https://hub.example.com
+		
+		log.Printf("[AGENT] Datacenter name: %s", dcName)
+		if hubURL != "" {
+			log.Printf("[AGENT] Hub URL: %s", hubURL)
+			if hubToken != "" {
+				log.Printf("[AGENT] Using bearer token for hub authentication")
+			}
+		} else {
+			log.Println("[AGENT] No hub URL configured, running standalone")
+		}
 
 		interval := 5 * time.Second
 
@@ -565,21 +619,24 @@ func main() {
 			doFetch := func() {
 				data, err := fetchStatus(ctx, k8s, dynClient)
 				if err != nil {
-					log.Printf("Error fetching status: %v", err)
+					log.Printf("[AGENT] Error fetching status: %v", err)
 					return
 				}
 				data.Datacenter = dcName
+				log.Printf("[AGENT] Fetched status: nodes=%d, clusters=%d, vms=%d", 
+					len(data.Nodes), len(data.Clusters), countVMs(data.Clusters))
 
 				jsonData, err := json.Marshal(data)
 				if err != nil {
-					log.Printf("Error marshaling data: %v", err)
+					log.Printf("[AGENT] Error marshaling data: %v", err)
 					return
 				}
 				broker.Broadcast(jsonData)
+				log.Printf("[AGENT] Broadcast to %d local clients", len(broker.clients))
 
 				// Push to hub if configured
 				if hubURL != "" {
-					go pushToHub(httpClient, hubURL, hubToken, jsonData)
+					go pushToHub(httpClient, hubURL, hubToken, jsonData, dcName)
 				}
 			}
 
@@ -606,7 +663,9 @@ func main() {
 		})
 
 		if dcName != "" {
-			log.Printf("Running in AGENT mode, datacenter=%s", dcName)
+			log.Printf("[AGENT] Ready, polling every 5s and serving /api/status")
+		} else {
+			log.Printf("[AGENT] WARNING: DATACENTER_NAME not set!")
 		}
 	}
 
@@ -646,24 +705,29 @@ func main() {
 	}
 }
 
-func pushToHub(client *http.Client, hubURL, token string, data []byte) {
+func pushToHub(client *http.Client, hubURL, token string, data []byte, dcName string) {
 	url := strings.TrimRight(hubURL, "/") + "/api/report"
+	log.Printf("[PUSH] Sending report to %s for datacenter=%q (size=%d bytes)", url, dcName, len(data))
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
-		log.Printf("Hub push: request error: %v", err)
+		log.Printf("[PUSH] Request error: %v", err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+		log.Printf("[PUSH] Using bearer token")
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Hub push: %v", err)
+		log.Printf("[PUSH] HTTP error: %v", err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		log.Printf("Hub push: status %d", resp.StatusCode)
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		log.Printf("[PUSH] HTTP %d: %s", resp.StatusCode, string(respBody))
+		return
 	}
+	log.Printf("[PUSH] Success: HTTP %d", resp.StatusCode)
 }
